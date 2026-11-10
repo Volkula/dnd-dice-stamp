@@ -1,0 +1,52 @@
+version: '3.8'
+
+services:
+  dnd-dice-stamp:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: dnd-dice-stamp
+    image: dnd-dice-stamp:latest
+
+    ports:
+      - "8080:80"
+
+    restart: unless-stopped
+
+    environment:
+      - TZ=Europe/Moscow
+
+    volumes:
+      - ./index.html:/usr/share/nginx/html/index.html:ro
+      - ./styles.css:/usr/share/nginx/html/styles.css:ro
+      - ./app.js:/usr/share/nginx/html/app.js:ro
+      - ./stamp.js:/usr/share/nginx/html/stamp.js:ro
+      - ./geom2d.js:/usr/share/nginx/html/geom2d.js:ro
+      - ./samples:/usr/share/nginx/html/samples:ro
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost/"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 128M
+        reservations:
+          cpus: '0.1'
+          memory: 32M
+
+networks:
+  default:
+    name: dnd-dice-stamp-network
+    driver: bridge

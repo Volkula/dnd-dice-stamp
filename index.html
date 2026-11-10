@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Штамп для дайсов</title>
+  <link rel="stylesheet" href="./styles.css">
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/",
+      "manifold-3d": "https://cdn.jsdelivr.net/npm/manifold-3d@3.5.4/manifold.js",
+      "opentype.js": "https://cdn.jsdelivr.net/npm/opentype.js@1.3.4/dist/opentype.module.js"
+    }
+  }
+  </script>
+</head>
+<body>
+  <div class="app">
+    <header class="top">
+      <div class="brand">
+        <span class="mark" aria-hidden="true"></span>
+        <div>
+          <h1>Штамп для дайсов</h1>
+          <p>STL, точка на грани, текст или SVG — вдавить или поднять.</p>
+        </div>
+      </div>
+      <p id="engine" class="engine">Загрузка движка…</p>
+    </header>
+
+    <div class="layout">
+      <section class="stage" id="stage">
+        <div id="hint" class="hint">Сначала откройте STL</div>
+        <div id="drop" class="drop" hidden>Отпустите, чтобы открыть STL или SVG</div>
+        <div id="busy" class="busy" hidden>
+          <span>Считаю тело…</span>
+        </div>
+      </section>
+
+      <aside class="panel">
+        <section>
+          <h2>Модель</h2>
+          <label class="file">
+            <input id="file-stl" type="file" accept=".stl,model/stl">
+            <span>Открыть STL</span>
+          </label>
+          <button id="btn-sample" type="button" class="ghost">Куб 20×20×20 для пробы</button>
+          <p id="model-info" class="muted">Файл не открыт. Единицы штампа — те же, что у STL, обычно миллиметры.</p>
+          <div class="row">
+            <label class="color">Цвет
+              <input id="die-color" type="color" value="#d7c4a3">
+            </label>
+            <label class="check"><input id="smooth" type="checkbox" checked> Сгладить</label>
+            <button id="btn-flip" type="button" class="ghost" disabled>Вывернуть нормали</button>
+          </div>
+          <button id="btn-fit" type="button" class="ghost" disabled>Вписать в кадр</button>
+        </section>
+
+        <section>
+          <h2>Знак</h2>
+          <div class="tabs" role="tablist">
+            <button id="tab-text" type="button" class="tab is-on" role="tab" aria-selected="true">Текст</button>
+            <button id="tab-svg" type="button" class="tab" role="tab" aria-selected="false">SVG</button>
+          </div>
+          <div id="pane-text">
+            <label class="field">Надпись
+              <textarea id="text" rows="2" spellcheck="false">20</textarea>
+            </label>
+            <p class="muted">Латиница и кириллица. Редкого символа в шрифте может не быть — тогда SVG.</p>
+          </div>
+          <div id="pane-svg" hidden>
+            <label class="file">
+              <input id="file-svg" type="file" accept=".svg,image/svg+xml">
+              <span>Открыть SVG</span>
+            </label>
+            <label class="field">Или вставьте разметку
+              <textarea id="svg" rows="5" spellcheck="false" placeholder="<svg viewBox=&quot;0 0 100 100&quot;>…</svg>"></textarea>
+            </label>
+            <div id="presets" class="presets"></div>
+            <p class="muted">Нужна заливка. Обводка без fill не выдавится. Дырки — это внутренние контуры.</p>
+          </div>
+        </section>
+
+        <section>
+          <h2>Как нанести</h2>
+          <div class="modes">
+            <button id="mode-cut" type="button" class="mode is-on">Вдавить</button>
+            <button id="mode-raise" type="button" class="mode">Поднять</button>
+          </div>
+          <label class="slider">Высота знака
+            <span class="pair">
+              <input id="height" type="range" min="0.4" max="40" step="0.1" value="6">
+              <input id="height-num" type="number" min="0.2" max="200" step="0.1" value="6">
+            </span>
+          </label>
+          <label class="slider">Глубина
+            <span class="pair">
+              <input id="depth" type="range" min="0.05" max="8" step="0.05" value="0.6">
+              <input id="depth-num" type="number" min="0.02" max="50" step="0.05" value="0.6">
+            </span>
+          </label>
+          <label class="slider">Поворот на грани
+            <span class="pair">
+              <input id="rotation" type="range" min="-180" max="180" step="1" value="0">
+              <input id="rotation-num" type="number" min="-180" max="180" step="1" value="0">
+            </span>
+          </label>
+          <div class="offsets">
+            <label>Сдвиг по грани X
+              <input id="off-u" type="number" step="0.1" value="0">
+            </label>
+            <label>Y
+              <input id="off-v" type="number" step="0.1" value="0">
+            </label>
+          </div>
+          <p class="muted">Клик по модели ставит новый штамп. Shift+клик переносит выбранный. Поворот и сдвиг правятся у выбранного и не меняют уже поставленный текст.</p>
+        </section>
+
+        <section>
+          <div class="section-head">
+            <h2>Штампы</h2>
+            <button id="btn-deselect" type="button" class="text" hidden>Снять выбор</button>
+          </div>
+          <ul id="stamps" class="stamps"></ul>
+          <div class="actions">
+            <button id="btn-apply" type="button" class="primary" disabled>Нанести на модель</button>
+            <button id="btn-undo" type="button" disabled>Отменить нанесение</button>
+            <button id="btn-reset" type="button" disabled>Вернуть исходный STL</button>
+            <button id="btn-download" type="button" disabled>Скачать STL</button>
+          </div>
+        </section>
+
+        <p id="status" class="status" role="status">Откройте STL и кликните по грани.</p>
+      </aside>
+    </div>
+  </div>
+  <script type="module" src="./app.js"></script>
+  <script>
+    setTimeout(function () {
+      if (window.__diceApp) return;
+      var note = document.createElement('p');
+      note.className = 'boot-error';
+      note.textContent = 'Приложение не стартовало. Его нужно открывать через сервер (Docker или GitHub Pages), не двойным щелчком по файлу, и с интернетом: трёхмерный движок и шрифт подгружаются снаружи.';
+      document.body.prepend(note);
+    }, 8000);
+  </script>
+</body>
+</html>
