@@ -3,17 +3,21 @@
 
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
-import { t } from './i18n.js?v=4';
+import { t } from './i18n.js?v=5';
 
 const RAPIER_URL = 'https://cdn.jsdelivr.net/npm/@dimforge/rapier3d-compat@0.14.0/rapier.es.js';
 const STEP = 1 / 240;
 const MAX_STEPS_PER_FRAME = 12;
 const GRAVITY = 981;
-const TIMEOUT = 10;
+const TIMEOUT = 6;
+// Seconds of free tumbling before the dice are braked harder.
+const CALM_AFTER = 2.5;
 // Dice count as stopped when all of them stay under these speeds (cm/s, rad/s) for this long (s).
 const QUIET_SPEED = 2;
 const QUIET_SPIN = 0.6;
 const QUIET_TIME = 0.35;
+// A top face must look up at least this close to how squarely the bottom one looks down.
+const EDGE_MARGIN = 0.0015;
 const TRAY = { width: 30, depth: 20, wall: 4, thick: 1.2, sky: 70 };
 const VIEW_DIRECTION = new THREE.Vector3(0, -34, 32).normalize();
 const SETTINGS_KEY = 'dice.roll';
@@ -95,6 +99,41 @@ function hullPoints(positions) {
   return out;
 }
 
+// Directions of the die's flat faces: normals that carry a real share of the surface.
+// A dense sculpted mesh has no faces in this sense and gets an empty list.
+function flatNormals(geometry) {
+  const position = geometry.getAttribute('position');
+  const index = geometry.getIndex();
+  const triangles = (index ? index.count : position.count) / 3;
+  if (triangles > 20000) return [];
+  const a = new THREE.Vector3();
+  const b = new THREE.Vector3();
+  const c = new THREE.Vector3();
+  const sums = new Map();
+  let total = 0;
+  for (let i = 0; i < triangles; i++) {
+    a.fromBufferAttribute(position, index ? index.getX(i * 3) : i * 3);
+    b.fromBufferAttribute(position, index ? index.getX(i * 3 + 1) : i * 3 + 1);
+    c.fromBufferAttribute(position, index ? index.getX(i * 3 + 2) : i * 3 + 2);
+    b.sub(a);
+    c.sub(a);
+    b.cross(c);
+    const area = b.length() / 2;
+    if (!(area > 0)) continue;
+    b.normalize();
+    total += area;
+    const id = `${Math.round(b.x * 50)},${Math.round(b.y * 50)},${Math.round(b.z * 50)}`;
+    const entry = sums.get(id);
+    if (entry) entry.area += area;
+    else sums.set(id, { area, normal: b.clone() });
+  }
+  const out = [];
+  for (const entry of sums.values()) {
+    if (entry.area >= total * 0.004) out.push(entry.normal);
+  }
+  return out;
+}
+
 function numberOf(label) {
   const match = /^\s*(-?\d+(?:[.,]\d+)?)\.?\s*$/.exec(label);
   return match ? Number(match[1].replace(',', '.')) : null;
@@ -126,11 +165,13 @@ export function createRoller() {
   let scaled = null;
   let material = null;
   let marks = [];
+  let flats = [];
   let frame = 0;
   let last = 0;
   let carry = 0;
   let elapsed = 0;
   let quiet = 0;
+  let calmed = false;
   // True once every die is asleep: the physics stops stepping until the next throw.
   let resting = true;
   // 'idle' | 'loading' | 'rolling' | 'done' | 'failed'
@@ -373,6 +414,7 @@ export function createRoller() {
     carry = 0;
     elapsed = 0;
     quiet = 0;
+    calmed = false;
     resting = false;
     labels = [];
     phase = 'rolling';
@@ -395,17 +437,36 @@ export function createRoller() {
   function faceUp(die) {
     const r = die.body.rotation();
     up.set(0, 0, 1).applyQuaternion(turnBack.set(r.x, r.y, r.z, r.w).invert());
-    let best = null;
-    // Below this the die rests on an edge or shows a vertex, as a d4 does: no face is "up".
-    let bestDot = 0.6;
+    let top = null;
+    let topDot = -Infinity;
+    let bottom = null;
+    let bottomDot = Infinity;
     for (const mark of marks) {
       const dot = mark.normal.dot(up);
-      if (dot > bestDot) {
-        bestDot = dot;
-        best = mark;
+      if (dot > topDot) {
+        topDot = dot;
+        top = mark;
+      }
+      if (dot < bottomDot) {
+        bottomDot = dot;
+        bottom = mark;
       }
     }
-    return best ? best.label : null;
+    if (!top) return null;
+    // How squarely the die's own flat faces look up and down. A sculpted mesh has none: its signs decide.
+    let flatTop = flats.length ? -Infinity : topDot;
+    let flatBottom = -Infinity;
+    for (const normal of flats) {
+      const dot = normal.dot(up);
+      if (dot > flatTop) flatTop = dot;
+      if (-dot > flatBottom) flatBottom = -dot;
+    }
+    if (flatTop >= flatBottom - EDGE_MARGIN) {
+      // A face is on top. Below 0.6 the die leans on an edge and no sign is "up".
+      return topDot >= flatTop - 0.01 && topDot > 0.6 ? top.label : null;
+    }
+    // A d4 or a die with an odd number of faces shows an edge or a corner: it is read by the face it lies on.
+    return -bottomDot >= flatBottom - 0.01 && -bottomDot > 0.9 ? bottom.label : null;
   }
 
   function quietNow() {
@@ -441,6 +502,15 @@ export function createRoller() {
       }
       if (steps === MAX_STEPS_PER_FRAME) carry = 0;
       syncMeshes();
+      // Round dice (a coin on its rim, a cylinder) would roll about the tray for a long time:
+      // nothing in the model stands for rolling resistance, so the damping grows instead.
+      if (elapsed > CALM_AFTER && !calmed) {
+        calmed = true;
+        for (const die of dice) {
+          die.body.setLinearDamping(1.2);
+          die.body.setAngularDamping(2.5);
+        }
+      }
       quiet = quietNow() ? quiet + dt : 0;
       // The engine puts bodies to sleep about two seconds after they stop; the reading need not wait for that.
       const asleep = elapsed > TIMEOUT || dice.every((die) => die.body.isSleeping());
@@ -475,6 +545,7 @@ export function createRoller() {
     const size = base.boundingBox.getSize(new THREE.Vector3());
     base.translate(-center.x, -center.y, -center.z);
     baseSize = Math.max(size.x, size.y, size.z) || 1;
+    flats = flatNormals(base);
     if (material) material.dispose();
     material = new THREE.MeshStandardMaterial({ color, roughness: 0.48, metalness: 0.04, flatShading: flat });
     marks = faceMarks.map((mark) => ({ label: mark.label, normal: new THREE.Vector3().fromArray(mark.normal).normalize() }));

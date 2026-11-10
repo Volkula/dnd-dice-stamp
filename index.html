@@ -12,7 +12,7 @@
       document.documentElement.dataset.theme = themes.indexOf(saved) >= 0 ? saved : 'midnight';
     })();
   </script>
-  <link rel="stylesheet" href="./styles.css?v=4">
+  <link rel="stylesheet" href="./styles.css?v=5">
   <script type="importmap">
   {
     "imports": {
@@ -35,7 +35,8 @@
         </div>
       </div>
       <div class="top-tools">
-        <button id="btn-roll" type="button" class="primary" data-i18n="roll.open" disabled>Бросить кубик</button>
+        <button id="btn-gen" type="button" class="primary" data-i18n="gen.open">Генератор кубов</button>
+        <button id="btn-roll" type="button" data-i18n="roll.open" disabled>Бросить кубик</button>
         <label class="pick-setting">
           <span data-i18n="ui.lang">Язык</span>
           <select id="lang"></select>
@@ -77,12 +78,24 @@
         </section>
 
         <section>
-          <h2 data-i18n="model.title">Модель</h2>
-          <label class="file">
-            <input id="file-stl" type="file" accept=".stl,model/stl">
-            <span data-i18n="model.open">Открыть STL</span>
+          <h2 data-i18n="scene.title">Сцена</h2>
+          <div class="row">
+            <label class="file">
+              <input id="file-stl" type="file" accept=".stl,model/stl">
+              <span data-i18n="scene.addStl">Добавить STL</span>
+            </label>
+            <button id="btn-sample" type="button" class="ghost" data-i18n="scene.sample">Куб 20×20×20</button>
+          </div>
+          <ul id="objects" class="stamps objects"></ul>
+          <button id="btn-fit-all" type="button" class="ghost" data-i18n="scene.fitAll" disabled>Показать всю сцену</button>
+          <p class="muted" data-i18n="scene.note">Штампы ставятся на выбранный объект. Клик по другому объекту на сцене выбирает его.</p>
+        </section>
+
+        <section>
+          <h2 data-i18n="model.title">Объект</h2>
+          <label class="field"><span data-i18n="model.name">Название</span>
+            <input id="obj-name" type="text" spellcheck="false" autocomplete="off" disabled>
           </label>
-          <button id="btn-sample" type="button" class="ghost" data-i18n="model.sample">Куб 20×20×20 для пробы</button>
           <p id="model-info" class="muted"></p>
           <div class="row">
             <label class="color"><span data-i18n="model.color">Цвет</span>
@@ -213,6 +226,13 @@
             <button id="btn-dir-clear" type="button" class="ghost" data-i18n="export.dirClear" hidden>Сбросить</button>
           </div>
           <p id="dir-name" class="muted"></p>
+          <label class="field"><span data-i18n="export.scope">Что сохранять</span>
+            <select id="export-scope">
+              <option value="active" data-i18n="export.scopeActive">Выбранный объект</option>
+              <option value="each" data-i18n="export.scopeEach">Все видимые объекты, каждый в свой файл</option>
+              <option value="merged" data-i18n="export.scopeMerged">Все видимые объекты одним файлом</option>
+            </select>
+          </label>
           <div class="actions">
             <button id="btn-download" type="button" class="primary" data-i18n="export.stl" disabled>Сохранить STL</button>
           </div>
@@ -248,7 +268,49 @@
     </div>
   </div>
 
-  <script type="module" src="./app.js?v=4"></script>
+  <div id="gen" class="roll" hidden>
+    <div class="roll-box" role="dialog" aria-modal="true" aria-labelledby="gen-title">
+      <header class="roll-head">
+        <h2 id="gen-title" data-i18n="gen.title">Генератор кубов</h2>
+        <button id="gen-close" type="button" class="ghost" data-i18n="roll.close">Закрыть</button>
+      </header>
+      <div class="gen-body">
+        <div id="gen-stage" class="roll-stage gen-stage"></div>
+        <div class="gen-form">
+          <label class="field"><span data-i18n="gen.shape">Форма</span>
+            <select id="gen-shape"></select>
+          </label>
+          <label class="field"><span data-i18n="gen.counts">Сколько граней. Можно несколько чисел сразу</span>
+            <input id="gen-counts" type="text" inputmode="numeric" spellcheck="false" autocomplete="off" value="3, 5, 7, 23, 30">
+          </label>
+          <label class="slider"><span data-i18n="gen.size">Размер, мм — наибольший габарит</span>
+            <span class="pair">
+              <input id="gen-size" type="range" min="6" max="80" step="1" value="20">
+              <input id="gen-size-num" type="number" min="2" max="500" step="1" value="20">
+            </span>
+          </label>
+          <label class="slider" id="gen-stretch-row"><span><span data-i18n="gen.stretch">Вытянутость</span>: <output id="gen-stretch-out"></output></span>
+            <input id="gen-stretch" type="range" min="0.4" max="2.5" step="0.05" value="1">
+          </label>
+          <label class="field" id="gen-caps-row"><span data-i18n="gen.caps">Торцы</span>
+            <select id="gen-caps">
+              <option value="cone" data-i18n="gen.caps.cone">Острые</option>
+              <option value="dome" data-i18n="gen.caps.dome">Круглые</option>
+              <option value="flat" data-i18n="gen.caps.flat">Плоские</option>
+            </select>
+          </label>
+          <label class="check"><input id="gen-double" type="checkbox"> <span data-i18n="gen.double">Каждое число на двух противоположных гранях</span></label>
+          <label class="check"><input id="gen-number" type="checkbox" checked> <span data-i18n="gen.number">Сразу поставить числа на грани</span></label>
+          <p id="gen-info" class="muted"></p>
+          <div class="actions">
+            <button id="gen-add" type="button" class="primary" data-i18n="gen.add">Добавить на сцену</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script type="module" src="./app.js?v=5"></script>
   <script>
     setTimeout(function () {
       if (window.__diceApp) return;

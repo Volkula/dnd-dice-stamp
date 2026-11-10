@@ -354,7 +354,14 @@ input[type="checkbox"] { accent-color: var(--accent); width: 16px; height: 16px;
 
 .sym img { display: block; width: 26px; height: 26px; }
 
-.stamps { list-style: none; margin: 10px 0 0; padding: 0; display: grid; gap: 6px; }
+.stamps {
+  list-style: none;
+  margin: 10px 0 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 6px;
+}
 .stamps li { display: flex; gap: 6px; }
 .stamps li button.pick {
   flex: 1;
@@ -367,6 +374,9 @@ input[type="checkbox"] { accent-color: var(--accent); width: 16px; height: 16px;
 }
 .stamps li.is-on button.pick { border-color: var(--accent); background: var(--accent-soft); }
 .stamps .x { padding: 8px 10px; color: var(--cut); }
+.stamps .tool { padding: 8px 9px; min-width: 38px; }
+.objects li.is-hidden button.pick { opacity: 0.55; }
+.objects + .ghost { margin-top: 10px; }
 
 .actions { display: grid; }
 .actions button { width: 100%; }
@@ -456,7 +466,26 @@ input[type="checkbox"] { accent-color: var(--accent); width: 16px; height: 16px;
 .roll-controls .slider { margin-top: 0; }
 .roll-note { margin: 8px 14px 12px; }
 
+.gen-body {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 340px;
+}
+
+.gen-stage { min-height: 200px; }
+
+.gen-form {
+  overflow: auto;
+  padding: 2px 14px 14px;
+  border-left: var(--line-width) solid var(--line);
+}
+
+.gen-form .check { margin-top: 10px; }
+
 @media (max-width: 900px) {
+  .gen-body { grid-template-columns: 1fr; grid-template-rows: minmax(180px, 38%) minmax(0, 1fr); }
+  .gen-form { border-left: 0; border-top: var(--line-width) solid var(--line); }
   .layout { grid-template-columns: 1fr; }
   .stage { height: 62vh; }
   .panel { border-left: 0; border-top: var(--line-width) solid var(--line); }

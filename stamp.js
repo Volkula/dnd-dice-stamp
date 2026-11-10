@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { mergeVertices } from 'three/addons/utils/BufferGeometryUtils.js';
 import Module from 'manifold-3d';
-import { AppError } from './i18n.js?v=4';
+import { AppError } from './i18n.js?v=5';
 
 const WASM = 'https://cdn.jsdelivr.net/npm/manifold-3d@3.5.4/manifold.wasm';
 
@@ -12,6 +12,11 @@ export async function initManifold() {
   const wasm = await Module({ locateFile: () => WASM });
   wasm.setup();
   api = wasm;
+  return api;
+}
+
+// The loaded manifold module, or null while it is still downloading.
+export function manifoldApi() {
   return api;
 }
 

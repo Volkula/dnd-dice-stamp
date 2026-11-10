@@ -1,8 +1,9 @@
 import * as THREE from 'three';
-import { AppError } from './i18n.js?v=4';
+import { AppError } from './i18n.js?v=5';
 
 export const PROJECT_APP = 'dnd-dice-stamp';
-export const PROJECT_VERSION = 1;
+// Version 2 holds several objects; version 1 files with a single model still open.
+export const PROJECT_VERSION = 2;
 export const PROJECT_EXT = '.dicestamp.json';
 
 export function toBase64(data) {

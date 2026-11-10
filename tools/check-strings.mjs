@@ -24,7 +24,7 @@ for (const [lang, table] of Object.entries(STRINGS)) {
 
 const used = new Set();
 const sources = readdirSync(root).filter((name) => /\.(js|html)$/.test(name) && name !== 'strings.js');
-const keyShape = /['"]((?:app|ui|theme|stage|project|model|sign|text|font|svg|sym|how|stamps|export|roll|preset|status|hint|engine|busy|where|err)\.[A-Za-z0-9.]+)['"]/g;
+const keyShape = /['"]((?:app|ui|theme|stage|project|model|sign|text|font|svg|sym|how|stamps|export|roll|preset|status|hint|engine|busy|where|err|gen|scene)\.[A-Za-z0-9.]+)['"]/g;
 for (const name of sources) {
   const text = readFileSync(join(root, name), 'utf8');
   for (const match of text.matchAll(keyShape)) used.add(match[1]);

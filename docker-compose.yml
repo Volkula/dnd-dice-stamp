@@ -29,6 +29,8 @@ services:
       - ./fonts.js:/usr/share/nginx/html/fonts.js:ro
       - ./symbols.js:/usr/share/nginx/html/symbols.js:ro
       - ./roll.js:/usr/share/nginx/html/roll.js:ro
+      - ./dicegen.js:/usr/share/nginx/html/dicegen.js:ro
+      - ./genui.js:/usr/share/nginx/html/genui.js:ro
       - ./samples:/usr/share/nginx/html/samples:ro
 
     logging:

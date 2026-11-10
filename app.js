@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { STLLoader } from 'three/addons/loaders/STLLoader.js';
 import { STLExporter } from 'three/addons/exporters/STLExporter.js';
-import { artworkFromSvg, fitContours } from './geom2d.js?v=4';
+import { artworkFromSvg, fitContours } from './geom2d.js?v=5';
 import {
   initManifold,
   localToolGeometry,
@@ -10,7 +10,8 @@ import {
   applyStamps,
   flipWinding,
   signedVolume,
-} from './stamp.js?v=4';
+  manifoldApi,
+} from './stamp.js?v=5';
 import {
   LANGS,
   AppError,
@@ -23,8 +24,8 @@ import {
   onLangChange,
   applyI18n,
   locale,
-} from './i18n.js?v=4';
-import { cacheGet, cacheSet, cacheDel } from './store.js?v=4';
+} from './i18n.js?v=5';
+import { cacheGet, cacheSet, cacheDel } from './store.js?v=5';
 import {
   DEFAULT_FONT,
   EMOJI_CSS_FAMILY,
@@ -40,9 +41,11 @@ import {
   customFonts,
   needsEmoji,
   layoutText,
-} from './fonts.js?v=4';
-import { LIBRARIES, library, loadLibrary, searchItems } from './symbols.js?v=4';
-import { createRoller } from './roll.js?v=4';
+} from './fonts.js?v=5';
+import { LIBRARIES, library, loadLibrary, searchItems } from './symbols.js?v=5';
+import { createRoller } from './roll.js?v=5';
+import { buildDie, fitHeight, shapeById } from './dicegen.js?v=5';
+import { createGenerator } from './genui.js?v=5';
 import {
   PROJECT_APP,
   PROJECT_VERSION,
@@ -55,7 +58,7 @@ import {
   decodeGeometry,
   stampToData,
   stampFromData,
-} from './project.js?v=4';
+} from './project.js?v=5';
 
 const THEMES = ['midnight', 'day', 'contrast', 'sepia'];
 const THEME_KEY = 'dice.theme';
@@ -93,6 +96,11 @@ const ui = {
   lang: $('lang'),
   theme: $('theme'),
   roll: $('btn-roll'),
+  gen: $('btn-gen'),
+  objects: $('objects'),
+  fitAll: $('btn-fit-all'),
+  name: $('obj-name'),
+  scope: $('export-scope'),
   fileProject: $('file-project'),
   saveProject: $('btn-save-project'),
   newProject: $('btn-new'),
@@ -208,11 +216,25 @@ const raiseMatOn = raiseMat.clone();
 raiseMatOn.opacity = 0.92;
 raiseMatOn.emissive.set(0x7a5512);
 
-function previewMaterial(stamp) {
-  const on = stamp.id === selectedId;
+function previewMaterial(obj, stamp) {
+  const on = obj === active && stamp.id === obj.selectedId;
   if (stamp.mode === 'raise') return on ? raiseMatOn : raiseMat;
   return on ? cutMatOn : cutMat;
 }
+
+// A ring on the floor marks the object the panel works on once there is more than one.
+const ring = new THREE.Mesh(
+  new THREE.RingGeometry(0.965, 1, 96),
+  new THREE.MeshBasicMaterial({
+    color: cssVar('--accent', '#e2b15a'),
+    transparent: true,
+    opacity: 0.85,
+    side: THREE.DoubleSide,
+    depthWrite: false,
+  }),
+);
+ring.visible = false;
+scene.add(ring);
 
 let engineReady = false;
 let fontReady = false;
@@ -223,23 +245,16 @@ let pane = 'text';
 let svgLabel = '';
 let mode = 'cut';
 let formLock = false;
-let diceMesh = null;
-let sourceGeometry = null;
-let sourceSolid = false;
-let sourceName = 'dice';
-let solidReady = false;
-let modelStats = null;
-let stamps = [];
-let selectedId = null;
-// Baked stamps as { label, normal }: the tray reads a throw by the mark that faces up.
-let marks = [];
-let history = [];
-let stampSeq = 1;
+// Everything on the scene. Each object keeps its own model, stamps and undo history;
+// stamp coordinates are in the object's own space, the scene only decides where the object stands.
+let objects = [];
+// The object the panel edits and a click stamps.
+let active = null;
+let objectSeq = 1;
 let busy = false;
 let exportDir = null;
 const canPickDir = typeof window.showDirectoryPicker === 'function';
-const previews = new Map();
-const rebuildTimers = new Map();
+const generator = createGenerator({ engine: manifoldApi, onAdd: addGenerated });
 
 // Shown texts are kept as message keys so a language switch can redraw them.
 const live = {
@@ -308,7 +323,8 @@ function setPair(range, field, value) {
 }
 
 function selectedStamp() {
-  return stamps.find((stamp) => stamp.id === selectedId) || null;
+  if (!active) return null;
+  return active.stamps.find((stamp) => stamp.id === active.selectedId) || null;
 }
 
 function signSummary() {
@@ -317,16 +333,20 @@ function signSummary() {
 }
 
 function syncButtons() {
-  const hasMesh = Boolean(diceMesh);
-  ui.flip.disabled = !hasMesh || busy;
-  ui.fit.disabled = !hasMesh || busy;
-  ui.roll.disabled = !hasMesh || busy;
-  ui.saveProject.disabled = !hasMesh || busy;
-  ui.newProject.disabled = !hasMesh || busy;
-  ui.apply.disabled = !hasMesh || !solidReady || !engineReady || stamps.length === 0 || busy;
-  ui.undo.disabled = history.length === 0 || busy;
-  ui.reset.disabled = !sourceGeometry || busy;
-  ui.download.disabled = !hasMesh || busy;
+  const has = Boolean(active);
+  const any = objects.length > 0;
+  ui.flip.disabled = !has || busy;
+  ui.fit.disabled = !has || busy;
+  ui.fitAll.disabled = !any || busy;
+  ui.roll.disabled = !has || busy;
+  ui.gen.disabled = busy;
+  ui.name.disabled = !has;
+  ui.saveProject.disabled = !any || busy;
+  ui.newProject.disabled = !any || busy;
+  ui.apply.disabled = !has || !active.solid || !engineReady || active.stamps.length === 0 || busy;
+  ui.undo.disabled = !has || active.history.length === 0 || busy;
+  ui.reset.disabled = !has || busy;
+  ui.download.disabled = !any || busy;
   ui.fontRemove.disabled = !hasFont(ui.font.value) || ui.font.value === DEFAULT_FONT;
   const selected = selectedStamp();
   ui.deselect.hidden = !selected;
@@ -342,47 +362,56 @@ function formatNumber(n) {
 
 function measure(geometry) {
   geometry.computeBoundingBox();
-  const size = geometry.boundingBox.getSize(new THREE.Vector3());
   const position = geometry.getAttribute('position');
-  modelStats = {
-    size,
+  return {
+    box: geometry.boundingBox.clone(),
+    size: geometry.boundingBox.getSize(new THREE.Vector3()),
     triangles: Math.round((geometry.index ? geometry.index.count : position.count) / 3),
     volume: Math.abs(signedVolume(geometry)),
   };
 }
 
 function renderInfo() {
-  if (!diceMesh || !modelStats) {
+  if (!active) {
     ui.info.textContent = t('model.none');
     return;
   }
+  const stats = active.stats;
   const text = t('model.info', {
-    x: formatNumber(modelStats.size.x),
-    y: formatNumber(modelStats.size.y),
-    z: formatNumber(modelStats.size.z),
-    triangles: modelStats.triangles.toLocaleString(locale()),
-    volume: formatNumber(modelStats.volume),
+    x: formatNumber(stats.size.x),
+    y: formatNumber(stats.size.y),
+    z: formatNumber(stats.size.z),
+    triangles: stats.triangles.toLocaleString(locale()),
+    volume: formatNumber(stats.volume),
   });
-  ui.info.textContent = solidReady ? text : `${text} ${t('model.notSolid')}`;
+  ui.info.textContent = active.solid ? text : `${text} ${t('model.notSolid')}`;
 }
 
-function modelRadius() {
-  const box = new THREE.Box3().setFromObject(diceMesh);
-  return {
-    center: box.getCenter(new THREE.Vector3()),
-    radius: Math.max(box.getSize(new THREE.Vector3()).length() * 0.9, 1),
-  };
+// Where the object's bounding box is on the scene.
+function objectBox(obj) {
+  return obj.stats.box.clone().translate(obj.group.position);
+}
+
+function sceneBox(visibleOnly) {
+  const box = new THREE.Box3();
+  for (const obj of objects) {
+    if (visibleOnly && !obj.group.visible) continue;
+    box.union(objectBox(obj));
+  }
+  return box;
 }
 
 function setClipping(radius) {
+  const whole = sceneBox(false);
+  const reach = whole.isEmpty() ? radius : Math.max(radius, whole.getSize(new THREE.Vector3()).length());
   camera.near = Math.max(radius / 800, 1e-4);
-  camera.far = radius * 50;
+  camera.far = reach * 50;
   camera.updateProjectionMatrix();
 }
 
-function fitCamera() {
-  if (!diceMesh) return;
-  const { center, radius } = modelRadius();
+function frameBox(box) {
+  const center = box.getCenter(new THREE.Vector3());
+  const radius = Math.max(box.getSize(new THREE.Vector3()).length() * 0.9, 1);
   controls.target.copy(center);
   camera.position.copy(center).add(new THREE.Vector3(radius, -radius * 1.25, radius * 0.85));
   setClipping(radius);
@@ -390,97 +419,345 @@ function fitCamera() {
   touch();
 }
 
-function showGeometry(geometry, solid) {
-  if (!diceMesh) {
-    diceMesh = new THREE.Mesh(geometry, new THREE.MeshStandardMaterial({
-      color: ui.color.value,
-      roughness: 0.48,
-      metalness: 0.04,
-      side: THREE.DoubleSide,
-    }));
-    diceMesh.material.flatShading = !ui.smooth.checked;
-    scene.add(diceMesh);
-  } else {
-    diceMesh.geometry.dispose();
-    diceMesh.geometry = geometry;
-  }
-  solidReady = solid;
-  measure(geometry);
-  renderInfo();
-  syncButtons();
+function fitCamera() {
+  if (active) frameBox(objectBox(active));
 }
 
-function removeModel() {
-  if (diceMesh) {
-    scene.remove(diceMesh);
-    diceMesh.geometry.dispose();
-    diceMesh.material.dispose();
-    diceMesh = null;
-  }
-  if (sourceGeometry) {
-    sourceGeometry.dispose();
-    sourceGeometry = null;
-  }
-  sourceSolid = false;
-  solidReady = false;
-  modelStats = null;
-  marks = [];
+function fitScene() {
+  const box = sceneBox(true);
+  if (!box.isEmpty()) frameBox(box);
 }
 
-function clearStamps() {
-  for (const timer of rebuildTimers.values()) clearTimeout(timer);
-  rebuildTimers.clear();
-  for (const mesh of previews.values()) {
-    scene.remove(mesh);
+// ---- Scene objects ----
+
+function createObject(id, name, color) {
+  const group = new THREE.Group();
+  const mesh = new THREE.Mesh(new THREE.BufferGeometry(), new THREE.MeshStandardMaterial({
+    color,
+    roughness: 0.48,
+    metalness: 0.04,
+    side: THREE.DoubleSide,
+    flatShading: !ui.smooth.checked,
+  }));
+  group.add(mesh);
+  scene.add(group);
+  const obj = {
+    id,
+    name,
+    color,
+    group,
+    mesh,
+    solid: false,
+    // The geometry as it was opened or generated, for "restore the original".
+    source: null,
+    sourceSolid: false,
+    // True once the model differs from the source, so the source is worth storing separately.
+    edited: false,
+    stats: null,
+    stamps: [],
+    selectedId: null,
+    stampSeq: 1,
+    // Baked stamps as { label, normal }: the tray reads a throw by the mark that faces up.
+    marks: [],
+    history: [],
+    previews: new Map(),
+    timers: new Map(),
+  };
+  mesh.userData.owner = obj;
+  return obj;
+}
+
+function setGeometry(obj, geometry, solid) {
+  if (obj.mesh.geometry !== geometry) obj.mesh.geometry.dispose();
+  obj.mesh.geometry = geometry;
+  obj.solid = solid;
+  obj.stats = measure(geometry);
+}
+
+// Stands the objects in a grid on the floor. Their own coordinates are untouched.
+function layout() {
+  const count = objects.length;
+  if (!count) {
+    ring.visible = false;
+    return;
+  }
+  const columns = Math.ceil(Math.sqrt(count));
+  const rows = Math.ceil(count / columns);
+  // A column is as wide as its widest object and a row as deep as its deepest one,
+  // so one large model does not push small dice far apart.
+  const widths = new Array(columns).fill(0);
+  const depths = new Array(rows).fill(0);
+  let mean = 0;
+  objects.forEach((obj, i) => {
+    const { x, y } = obj.stats.size;
+    const column = i % columns;
+    const row = Math.floor(i / columns);
+    widths[column] = Math.max(widths[column], x);
+    depths[row] = Math.max(depths[row], y);
+    mean += (x + y) / (2 * count);
+  });
+  const gap = Math.max(mean * 0.5, 0.5);
+  const middles = (sizes) => {
+    const total = sizes.reduce((sum, size) => sum + size, 0) + gap * (sizes.length - 1);
+    let at = -total / 2;
+    return sizes.map((size) => {
+      const middle = at + size / 2;
+      at += size + gap;
+      return middle;
+    });
+  };
+  const xs = middles(widths);
+  const ys = middles(depths);
+  objects.forEach((obj, i) => {
+    const center = obj.stats.box.getCenter(new THREE.Vector3());
+    obj.group.position.set(
+      xs[i % columns] - center.x,
+      -ys[Math.floor(i / columns)] - center.y,
+      -obj.stats.box.min.z,
+    );
+    obj.group.updateMatrixWorld(true);
+  });
+  placeRing();
+}
+
+function placeRing() {
+  if (!active || objects.length < 2 || !active.group.visible) {
+    ring.visible = false;
+    return;
+  }
+  const box = objectBox(active);
+  const center = box.getCenter(new THREE.Vector3());
+  const size = box.getSize(new THREE.Vector3());
+  ring.visible = true;
+  ring.scale.setScalar(Math.max(Math.hypot(size.x, size.y) * 0.56, 0.5));
+  ring.position.set(center.x, center.y, 0);
+}
+
+function uniqueName(wanted) {
+  const base = String(wanted || '').trim() || 'dice';
+  const taken = new Set(objects.map((obj) => obj.name));
+  if (!taken.has(base)) return base;
+  for (let n = 2; ; n++) {
+    const next = `${base} ${n}`;
+    if (!taken.has(next)) return next;
+  }
+}
+
+function clearStamps(obj) {
+  for (const timer of obj.timers.values()) clearTimeout(timer);
+  obj.timers.clear();
+  for (const mesh of obj.previews.values()) {
+    obj.group.remove(mesh);
     mesh.geometry.dispose();
   }
-  previews.clear();
-  stamps = [];
-  selectedId = null;
-  renderList();
+  obj.previews.clear();
+  obj.stamps = [];
+  obj.selectedId = null;
+  if (obj === active) renderList();
 }
 
-function clearHistory() {
-  for (const entry of history) entry.geometry.dispose();
-  history = [];
+function clearHistory(obj) {
+  for (const entry of obj.history) entry.geometry.dispose();
+  obj.history = [];
 }
 
-function adoptGeometry(raw, name, asSource, autoFlip = true) {
-  clearStamps();
-  if (asSource) {
-    clearHistory();
-    marks = [];
+function disposeObject(obj) {
+  clearStamps(obj);
+  clearHistory(obj);
+  scene.remove(obj.group);
+  obj.mesh.geometry.dispose();
+  obj.mesh.material.dispose();
+  if (obj.source) obj.source.dispose();
+}
+
+// Colours a stamp preview. Only the selected stamp shows its direction arrow,
+// otherwise a numbered die bristles with thirty of them.
+function paintPreview(obj, stamp, mesh) {
+  mesh.material = previewMaterial(obj, stamp);
+  const arrow = mesh.children[0];
+  if (arrow) arrow.visible = obj === active && stamp.id === obj.selectedId;
+}
+
+function refreshPreviews(obj) {
+  for (const stamp of obj.stamps) {
+    const mesh = obj.previews.get(stamp.id);
+    if (mesh) paintPreview(obj, stamp, mesh);
   }
-  let geometry;
-  let solid = true;
-  let flipped = false;
-  let failure = null;
+}
+
+function sceneHint() {
+  if (!active) return 'hint.start';
+  return active.solid ? 'hint.ready' : 'hint.notSolid';
+}
+
+// Points the panel at an object (or at nothing) and redraws everything that depends on it.
+function activate(obj) {
+  const previous = active;
+  active = obj;
+  if (previous && previous !== obj && objects.includes(previous)) refreshPreviews(previous);
+  if (obj) {
+    ui.color.value = obj.color;
+    ui.name.value = obj.name;
+    const stamp = selectedStamp();
+    if (stamp) showStampInForm(stamp);
+  } else {
+    ui.name.value = '';
+  }
+  placeRing();
+  renderObjects();
+  renderList();
+  renderInfo();
+  setHint(sceneHint());
+  touch();
+}
+
+function setActive(obj) {
+  if (obj !== active) activate(obj);
+}
+
+function objectButton(text, title, className, onClick) {
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = className;
+  button.textContent = text;
+  button.title = title;
+  button.setAttribute('aria-label', title);
+  button.addEventListener('click', onClick);
+  return button;
+}
+
+function renderObjects() {
+  ui.objects.replaceChildren();
+  for (const obj of objects) {
+    const item = document.createElement('li');
+    if (obj === active) item.classList.add('is-on');
+    const shown = obj.group.visible;
+    if (!shown) item.classList.add('is-hidden');
+    const pick = objectButton(obj.name, obj.name, 'pick', () => {
+      setActive(obj);
+      setStatus('status.objectPicked', { name: obj.name });
+    });
+    if (obj === active) pick.setAttribute('aria-current', 'true');
+    item.append(
+      pick,
+      objectButton(shown ? '●' : '○', t(shown ? 'scene.hide' : 'scene.show'), 'tool', () => toggleObject(obj)),
+      objectButton('2×', t('scene.duplicate'), 'tool', () => duplicateObject(obj)),
+      objectButton('×', t('scene.remove'), 'x', () => removeObject(obj)),
+    );
+    ui.objects.append(item);
+  }
+  if (!objects.length) {
+    const item = document.createElement('li');
+    const note = document.createElement('span');
+    note.className = 'muted';
+    note.textContent = t('scene.empty');
+    item.append(note);
+    ui.objects.append(item);
+  }
+}
+
+function toggleObject(obj) {
+  obj.group.visible = !obj.group.visible;
+  placeRing();
+  renderObjects();
+  setStatus(obj.group.visible ? 'status.objectShown' : 'status.objectHidden', { name: obj.name });
+  touch();
+}
+
+function removeObject(obj) {
+  if (busy) return;
+  const hasWork = obj.stamps.length > 0 || obj.edited;
+  if (hasWork && !window.confirm(t('scene.removeConfirm', { name: obj.name }))) return;
+  const index = objects.indexOf(obj);
+  if (index < 0) return;
+  objects.splice(index, 1);
+  disposeObject(obj);
+  dropCached(obj);
+  layout();
+  if (obj === active) activate(objects[Math.min(index, objects.length - 1)] || null);
+  else renderObjects();
+  setStatus('status.objectRemoved', { name: obj.name });
+  saveSession();
+}
+
+function copyStamp(stamp) {
+  const copy = stampFromData(stampToData(stamp));
+  Object.assign(copy, shapeFor(copy.sourceContours, copy.height));
+  return copy;
+}
+
+function duplicateObject(obj) {
+  if (busy) return;
+  const copy = createObject(objectSeq++, uniqueName(obj.name), obj.color);
+  copy.source = obj.source.clone();
+  copy.sourceSolid = obj.sourceSolid;
+  copy.edited = obj.edited;
+  copy.marks = obj.marks.map((mark) => ({ label: mark.label, normal: mark.normal.slice() }));
+  objects.splice(objects.indexOf(obj) + 1, 0, copy);
+  setGeometry(copy, obj.mesh.geometry.clone(), obj.solid);
+  copy.group.visible = obj.group.visible;
+  for (const stamp of obj.stamps) {
+    const next = copyStamp(stamp);
+    next.id = copy.stampSeq++;
+    copy.stamps.push(next);
+    rebuildPreview(copy, next);
+  }
+  layout();
+  activate(copy);
+  fitCamera();
+  setStatus('status.objectCopied', { name: copy.name });
+  saveModel(copy);
+  saveSource(copy);
+  saveSession();
+}
+
+// Welds the mesh and checks it is a closed body; an open mesh is still shown, just not cut.
+function solidify(raw, autoFlip) {
   try {
     const prepared = prepareSolid(raw, { autoFlip });
-    geometry = prepared.geometry;
-    flipped = prepared.flipped;
+    return { geometry: prepared.geometry, solid: true, flipped: prepared.flipped, failure: null };
   } catch (error) {
-    geometry = error.geometry || raw;
-    solid = false;
-    failure = error;
+    return { geometry: error.geometry || raw, solid: false, flipped: false, failure: error };
   }
-  if (asSource) {
-    if (sourceGeometry) sourceGeometry.dispose();
-    sourceGeometry = geometry.clone();
-    sourceSolid = solid;
-    sourceName = name;
-  }
-  showGeometry(geometry, solid);
-  if (asSource) fitCamera();
-  if (failure) {
-    setStatus(errorMsg(failure, 'err.solid.open'));
-    setHint('hint.notSolid');
-  } else {
-    setStatus(flipped ? 'status.modelFlipped' : 'status.modelReady');
-    setHint('hint.ready');
-  }
-  saveModel();
-  if (asSource) saveSource();
+}
+
+function addObject(raw, name) {
+  const made = solidify(raw, true);
+  const obj = createObject(objectSeq++, uniqueName(name), ui.color.value);
+  obj.source = made.geometry.clone();
+  obj.sourceSolid = made.solid;
+  objects.push(obj);
+  setGeometry(obj, made.geometry, made.solid);
+  return { obj, made };
+}
+
+function importGeometry(raw, name) {
+  const { obj, made } = addObject(raw, name);
+  layout();
+  activate(obj);
+  fitCamera();
+  if (made.failure) setStatus(errorMsg(made.failure, 'err.solid.open'));
+  else setStatus(made.flipped ? 'status.modelFlipped' : 'status.modelReady');
+  saveModel(obj);
+  saveSource(obj);
+  saveSession();
+}
+
+function flipActive() {
+  const obj = active;
+  if (!obj || busy) return;
+  clearStamps(obj);
+  const made = solidify(flipWinding(obj.mesh.geometry), false);
+  setGeometry(obj, made.geometry, made.solid);
+  obj.edited = true;
+  layout();
+  renderInfo();
+  setHint(sceneHint());
+  syncButtons();
+  if (made.failure) setStatus(errorMsg(made.failure, 'err.solid.open'));
+  else setStatus('status.modelReady');
+  saveModel(obj);
+  saveSource(obj);
   touch();
 }
 
@@ -502,14 +779,22 @@ async function loadArrayBuffer(buffer, name) {
     setStatus('err.stlEmpty');
     return;
   }
-  adoptGeometry(geometry, name.replace(/\.stl$/i, '') || 'dice', true);
+  importGeometry(geometry, name.replace(/\.stl$/i, '') || 'dice');
 }
 
-function placementMatrix(stamp) {
-  const z = stamp.normal.clone().normalize();
+// ---- Stamps ----
+
+// The stamp's axes before its own rotation: z along the normal, y as upright as the face allows.
+function stampBasis(normal) {
+  const z = normal.clone().normalize();
   const helper = Math.abs(z.z) < 0.92 ? new THREE.Vector3(0, 0, 1) : new THREE.Vector3(0, 1, 0);
   const x = new THREE.Vector3().crossVectors(helper, z).normalize();
   const y = new THREE.Vector3().crossVectors(z, x).normalize();
+  return { x, y, z };
+}
+
+function placementMatrix(stamp) {
+  const { x, y, z } = stampBasis(stamp.normal);
   if (stamp.rotation) {
     const q = new THREE.Quaternion().setFromAxisAngle(z, THREE.MathUtils.degToRad(stamp.rotation));
     x.applyQuaternion(q);
@@ -523,8 +808,15 @@ function placementMatrix(stamp) {
   return matrix;
 }
 
-function stampJobs() {
-  return stamps.map((stamp) => ({
+// The rotation that turns a stamp on this face so its top points along `up`.
+function rotationFor(normal, up) {
+  const { y, z } = stampBasis(normal);
+  const angle = Math.atan2(new THREE.Vector3().crossVectors(y, up).dot(z), y.dot(up));
+  return Math.round(THREE.MathUtils.radToDeg(angle) * 100) / 100;
+}
+
+function stampJobs(obj) {
+  return obj.stamps.map((stamp) => ({
     contours: stamp.contours,
     fillRule: stamp.fillRule,
     depth: stamp.depth,
@@ -533,8 +825,8 @@ function stampJobs() {
   }));
 }
 
-function positionPreview(stamp) {
-  const mesh = previews.get(stamp.id);
+function positionPreview(obj, stamp) {
+  const mesh = obj.previews.get(stamp.id);
   if (!mesh) return;
   const matrix = placementMatrix(stamp);
   mesh.position.setFromMatrixPosition(matrix);
@@ -547,7 +839,7 @@ function positionPreview(stamp) {
   }
 }
 
-function rebuildPreview(stamp) {
+function rebuildPreview(obj, stamp) {
   let geometry;
   try {
     geometry = localToolGeometry(stamp.contours, stamp.fillRule, stamp.depth, stamp.mode);
@@ -555,20 +847,20 @@ function rebuildPreview(stamp) {
     setStatus(errorMsg(error, 'err.stampBuild'));
     return;
   }
-  let mesh = previews.get(stamp.id);
+  let mesh = obj.previews.get(stamp.id);
   if (!mesh) {
-    mesh = new THREE.Mesh(geometry, previewMaterial(stamp));
+    mesh = new THREE.Mesh(geometry, previewMaterial(obj, stamp));
     mesh.raycast = () => {};
     const arrow = new THREE.ArrowHelper(new THREE.Vector3(0, 0, 1), new THREE.Vector3(), 1, 0xf3eee6, 0.3, 0.16);
     mesh.add(arrow);
-    scene.add(mesh);
-    previews.set(stamp.id, mesh);
+    obj.group.add(mesh);
+    obj.previews.set(stamp.id, mesh);
   } else {
     mesh.geometry.dispose();
     mesh.geometry = geometry;
-    mesh.material = previewMaterial(stamp);
   }
-  positionPreview(stamp);
+  paintPreview(obj, stamp, mesh);
+  positionPreview(obj, stamp);
 }
 
 // Fitted contours are centred on the origin, so the footprint is symmetric.
@@ -585,9 +877,9 @@ function shapeFor(sourceContours, height) {
   return { contours, halfWidth, halfHeight };
 }
 
-function scheduleRebuild(stamp) {
-  clearTimeout(rebuildTimers.get(stamp.id));
-  rebuildTimers.set(stamp.id, setTimeout(() => rebuildPreview(stamp), 40));
+function scheduleRebuild(obj, stamp) {
+  clearTimeout(obj.timers.get(stamp.id));
+  obj.timers.set(stamp.id, setTimeout(() => rebuildPreview(obj, stamp), 40));
 }
 
 function stampName(stamp) {
@@ -605,9 +897,10 @@ function stampLabel(stamp) {
 
 function renderList() {
   ui.list.replaceChildren();
+  const stamps = active ? active.stamps : [];
   for (const stamp of stamps) {
     const item = document.createElement('li');
-    if (stamp.id === selectedId) item.classList.add('is-on');
+    if (stamp.id === active.selectedId) item.classList.add('is-on');
     const pick = document.createElement('button');
     pick.type = 'button';
     pick.className = 'pick';
@@ -627,20 +920,17 @@ function renderList() {
     const item = document.createElement('li');
     const note = document.createElement('span');
     note.className = 'muted';
-    note.textContent = t('stamps.empty');
+    note.textContent = t(active ? 'stamps.empty' : 'stamps.noObject');
     item.append(note);
     ui.list.append(item);
   }
-  for (const stamp of stamps) {
-    const mesh = previews.get(stamp.id);
-    if (mesh) mesh.material = previewMaterial(stamp);
-  }
+  if (active) refreshPreviews(active);
   syncButtons();
 }
 
 function deselect() {
-  if (selectedId == null) return;
-  selectedId = null;
+  if (!active || active.selectedId == null) return;
+  active.selectedId = null;
   renderList();
   setStatus('status.deselected');
   touch();
@@ -670,9 +960,10 @@ function showStampInForm(stamp) {
 }
 
 function selectStamp(id) {
-  const stamp = stamps.find((item) => item.id === id);
+  if (!active) return;
+  const stamp = active.stamps.find((item) => item.id === id);
   if (!stamp) return;
-  selectedId = id;
+  active.selectedId = id;
   showStampInForm(stamp);
   renderList();
   setStatus('status.selected', { label: stampLabel(stamp) });
@@ -680,16 +971,18 @@ function selectStamp(id) {
 }
 
 function removeStamp(id) {
-  stamps = stamps.filter((stamp) => stamp.id !== id);
-  clearTimeout(rebuildTimers.get(id));
-  rebuildTimers.delete(id);
-  const mesh = previews.get(id);
+  const obj = active;
+  if (!obj) return;
+  obj.stamps = obj.stamps.filter((stamp) => stamp.id !== id);
+  clearTimeout(obj.timers.get(id));
+  obj.timers.delete(id);
+  const mesh = obj.previews.get(id);
   if (mesh) {
-    scene.remove(mesh);
+    obj.group.remove(mesh);
     mesh.geometry.dispose();
-    previews.delete(id);
+    obj.previews.delete(id);
   }
-  if (selectedId === id) selectedId = null;
+  if (obj.selectedId === id) obj.selectedId = null;
   renderList();
   touch();
 }
@@ -725,8 +1018,7 @@ function missingMessage(artwork) {
 }
 
 async function placeStamp(hit) {
-  const point = hit.point.clone();
-  const normal = hit.face.normal.clone().transformDirection(diceMesh.matrixWorld).normalize();
+  const obj = hit.object;
   const height = Math.max(0.05, num(ui.height));
   let artwork;
   let shape;
@@ -737,9 +1029,9 @@ async function placeStamp(hit) {
     setStatus(errorMsg(error));
     return;
   }
-  if (!diceMesh) return;
+  if (!objects.includes(obj)) return;
   const stamp = {
-    id: stampSeq++,
+    id: obj.stampSeq++,
     kind: artwork.kind,
     source: artwork.source,
     label: artwork.label,
@@ -753,33 +1045,35 @@ async function placeStamp(hit) {
     rotation: 0,
     offsetU: 0,
     offsetV: 0,
-    point,
-    normal,
+    point: hit.point.clone(),
+    normal: hit.normal.clone(),
   };
-  stamps.push(stamp);
-  formLock = true;
-  setPair(ui.rotation, ui.rotationNum, 0);
-  ui.offU.value = '0';
-  ui.offV.value = '0';
-  formLock = false;
-  selectedId = stamp.id;
-  rebuildPreview(stamp);
-  renderList();
+  obj.stamps.push(stamp);
+  obj.selectedId = stamp.id;
+  rebuildPreview(obj, stamp);
+  if (obj === active) {
+    formLock = true;
+    setPair(ui.rotation, ui.rotationNum, 0);
+    ui.offU.value = '0';
+    ui.offV.value = '0';
+    formLock = false;
+    renderList();
+  }
   setStatus(missingMessage(artwork) || msg('status.placed'));
   touch();
 }
 
 // Sits the stamp on the surface under the hit and tilts it to that face.
-function seatStamp(stamp, hit) {
+function seatStamp(obj, stamp, hit) {
   stamp.point.copy(hit.point);
-  stamp.normal.copy(hit.face.normal).transformDirection(diceMesh.matrixWorld).normalize();
-  positionPreview(stamp);
+  stamp.normal.copy(hit.normal);
+  positionPreview(obj, stamp);
 }
 
 function moveSelected(hit) {
   const stamp = selectedStamp();
   if (!stamp) return;
-  seatStamp(stamp, hit);
+  seatStamp(active, stamp, hit);
   setStatus('status.moved');
   touch();
 }
@@ -789,16 +1083,17 @@ let sourceTimer = 0;
 function scheduleSourceEdit() {
   touch();
   syncButtons();
-  if (formLock || selectedId == null) return;
-  const id = selectedId;
+  const stamp = selectedStamp();
+  if (formLock || !stamp) return;
   clearTimeout(sourceTimer);
   sourceTimer = setTimeout(() => {
-    if (selectedId === id) applySourceEdit();
+    if (selectedStamp() === stamp) applySourceEdit();
   }, 120);
 }
 
 // Rebuilds the selected stamp from whatever is in the active sign field.
 async function applySourceEdit() {
+  const obj = active;
   const stamp = selectedStamp();
   if (!stamp) return false;
   let artwork;
@@ -810,7 +1105,7 @@ async function applySourceEdit() {
     setStatus('status.editKept', { reason: errorMsg(error) });
     return false;
   }
-  if (!stamps.includes(stamp)) return false;
+  if (!objects.includes(obj) || !obj.stamps.includes(stamp)) return false;
   Object.assign(stamp, shape, {
     kind: artwork.kind,
     source: artwork.source,
@@ -819,8 +1114,8 @@ async function applySourceEdit() {
     sourceContours: artwork.contours,
     fillRule: artwork.fillRule,
   });
-  rebuildPreview(stamp);
-  renderList();
+  rebuildPreview(obj, stamp);
+  if (obj === active) renderList();
   setStatus(missingMessage(artwork) || msg('status.signUpdated'));
   touch();
   return true;
@@ -866,21 +1161,29 @@ function onGeomInput() {
       setStatus(errorMsg(error));
       return;
     }
-    scheduleRebuild(stamp);
+    scheduleRebuild(active, stamp);
   } else {
-    positionPreview(stamp);
+    positionPreview(active, stamp);
   }
   renderList();
 }
 
-function hitAt(clientX, clientY) {
+// The nearest surface under the cursor, in the hit object's own coordinates.
+function hitAt(clientX, clientY, only = null) {
+  const targets = only ? [only.mesh] : objects.filter((obj) => obj.group.visible).map((obj) => obj.mesh);
+  if (!targets.length) return null;
   const rect = renderer.domElement.getBoundingClientRect();
   pointer.x = ((clientX - rect.left) / rect.width) * 2 - 1;
   pointer.y = -((clientY - rect.top) / rect.height) * 2 + 1;
   raycaster.setFromCamera(pointer, camera);
-  const hits = raycaster.intersectObject(diceMesh, false);
-  const hit = hits[0];
-  return hit && hit.face ? hit : null;
+  const hit = raycaster.intersectObjects(targets, false).find((entry) => entry.face);
+  if (!hit) return null;
+  const owner = hit.object.userData.owner;
+  return {
+    object: owner,
+    point: owner.group.worldToLocal(hit.point.clone()),
+    normal: hit.face.normal.clone().normalize(),
+  };
 }
 
 function screenPoint(world) {
@@ -893,11 +1196,11 @@ function screenPoint(world) {
 }
 
 // Picks by the stamp's padded bounding box: thin glyphs would be hard to grab exactly.
-function stampUnder(point) {
+function stampUnder(obj, point) {
   const local = new THREE.Vector3();
   let best = null;
   let bestDistance = Infinity;
-  for (const stamp of stamps) {
+  for (const stamp of obj.stamps) {
     local.copy(point).applyMatrix4(placementMatrix(stamp).invert());
     const pad = stamp.height * 0.15;
     if (Math.abs(local.x) > stamp.halfWidth + pad) continue;
@@ -912,13 +1215,14 @@ function stampUnder(point) {
   return best;
 }
 
-function dragTo(stamp, clientX, clientY) {
-  const hit = hitAt(clientX, clientY);
+function dragTo(obj, stamp, clientX, clientY) {
+  // Only the stamp's own object is tested, so a drag cannot jump to a neighbour.
+  const hit = hitAt(clientX, clientY, obj);
   if (!hit) return false;
   // The slider offsets live in the old face's plane, so the drag absorbs them.
   stamp.offsetU = 0;
   stamp.offsetV = 0;
-  seatStamp(stamp, hit);
+  seatStamp(obj, stamp, hit);
   return true;
 }
 
@@ -926,22 +1230,25 @@ function markOf(stamp) {
   return { label: stampName(stamp), normal: stamp.normal.toArray() };
 }
 
-// Cuts or adds every placed stamp. Resolves to false when the boolean failed.
-async function bake() {
-  if (!diceMesh || !stamps.length || busy || !solidReady) return false;
-  setBusy(true, 'busy.baking', { n: stamps.length });
+// Cuts or adds every placed stamp of the object. Resolves to false when the boolean failed.
+async function bake(obj = active) {
+  if (!obj || !obj.stamps.length || busy || !obj.solid) return false;
+  setBusy(true, 'busy.baking', { n: obj.stamps.length });
   await nextPaint();
   try {
-    const next = applyStamps(diceMesh.geometry, stampJobs());
-    history.push({ geometry: diceMesh.geometry, marks: marks.length });
-    if (history.length > HISTORY_LIMIT) history.shift().geometry.dispose();
-    marks = marks.concat(stamps.map(markOf));
-    diceMesh.geometry = next;
-    clearStamps();
-    measure(next);
-    renderInfo();
+    const next = applyStamps(obj.mesh.geometry, stampJobs(obj));
+    obj.history.push({ geometry: obj.mesh.geometry, marks: obj.marks.length, stamps: obj.stamps.slice() });
+    if (obj.history.length > HISTORY_LIMIT) obj.history.shift().geometry.dispose();
+    obj.marks = obj.marks.concat(obj.stamps.map(markOf));
+    obj.mesh.geometry = next;
+    obj.stats = measure(next);
+    obj.edited = true;
+    clearStamps(obj);
+    layout();
+    if (obj === active) renderInfo();
     setStatus('status.baked');
-    saveModel();
+    saveModel(obj);
+    saveSource(obj);
     touch();
     return true;
   } catch (error) {
@@ -953,30 +1260,155 @@ async function bake() {
 }
 
 function undo() {
-  const previous = history.pop();
-  if (!previous || !diceMesh) return;
-  clearStamps();
-  diceMesh.geometry.dispose();
-  diceMesh.geometry = previous.geometry;
-  marks = marks.slice(0, previous.marks);
-  solidReady = true;
-  measure(previous.geometry);
+  const obj = active;
+  if (!obj || busy) return;
+  const previous = obj.history.pop();
+  if (!previous) return;
+  obj.mesh.geometry.dispose();
+  obj.mesh.geometry = previous.geometry;
+  obj.marks = obj.marks.slice(0, previous.marks);
+  obj.solid = true;
+  obj.stats = measure(previous.geometry);
+  // The stamps of that step come back as editable ones, next to any placed since.
+  obj.stamps = previous.stamps.concat(obj.stamps);
+  for (const stamp of previous.stamps) rebuildPreview(obj, stamp);
+  layout();
+  renderList();
   renderInfo();
   setStatus('status.undone');
   syncButtons();
-  saveModel();
+  saveModel(obj);
   touch();
 }
 
 function resetSource() {
-  if (!sourceGeometry || !diceMesh) return;
-  clearStamps();
-  clearHistory();
-  marks = [];
-  showGeometry(sourceGeometry.clone(), sourceSolid);
+  const obj = active;
+  if (!obj || busy) return;
+  clearStamps(obj);
+  clearHistory(obj);
+  obj.marks = [];
+  setGeometry(obj, obj.source.clone(), obj.sourceSolid);
+  obj.edited = false;
+  layout();
+  renderInfo();
+  setHint(sceneHint());
+  syncButtons();
   setStatus('status.reset');
-  saveModel();
+  saveModel(obj);
+  saveSource(obj);
   touch();
+}
+
+// ---- Generated dice ----
+
+function polygonSize(face) {
+  let area = 0;
+  const origin = new THREE.Vector3().fromArray(face.polygon[0]);
+  const a = new THREE.Vector3();
+  const b = new THREE.Vector3();
+  for (let i = 1; i + 1 < face.polygon.length; i++) {
+    a.fromArray(face.polygon[i]).sub(origin);
+    b.fromArray(face.polygon[i + 1]).sub(origin);
+    area += a.cross(b).length() / 2;
+  }
+  return area;
+}
+
+// Puts the die's numbers on its faces as ordinary stamps, sized to fit and still editable.
+function numberStamps(obj, die) {
+  const fontId = hasFont(ui.font.value) ? ui.font.value : DEFAULT_FONT;
+  const depthWanted = Math.max(0.02, num(ui.depth));
+  const drafts = [];
+  for (const face of die.faces) {
+    let art;
+    let unit;
+    try {
+      art = layoutText(fontId, face.label, 10);
+      unit = shapeFor(art.contours, 1);
+    } catch {
+      continue;
+    }
+    drafts.push({ face, art, fit: fitHeight(face, unit.halfWidth / unit.halfHeight), area: polygonSize(face) });
+  }
+  for (const draft of drafts) {
+    // Faces of one size share the smallest fit among them, so "1" does not come out taller than "20".
+    let fit = draft.fit;
+    for (const other of drafts) {
+      if (Math.abs(other.area - draft.area) <= draft.area * 0.05) fit = Math.min(fit, other.fit);
+    }
+    const height = Math.max(0.2, Math.round(fit * 0.62 * 100) / 100);
+    const { face, art } = draft;
+    const normal = new THREE.Vector3().fromArray(face.normal);
+    obj.stamps.push({
+      id: obj.stampSeq++,
+      kind: 'text',
+      source: face.label,
+      label: '',
+      fontId,
+      sourceContours: art.contours,
+      ...shapeFor(art.contours, height),
+      fillRule: art.fillRule,
+      mode: 'cut',
+      height,
+      depth: Math.round(Math.min(depthWanted, Math.max(0.15, height * 0.14)) * 100) / 100,
+      rotation: rotationFor(normal, new THREE.Vector3().fromArray(face.up)),
+      offsetU: 0,
+      offsetV: 0,
+      point: new THREE.Vector3().fromArray(face.center),
+      normal,
+    });
+  }
+  for (const stamp of obj.stamps) rebuildPreview(obj, stamp);
+}
+
+// Called by the generator dialog with one spec per die.
+async function addGenerated(specs, number) {
+  try {
+    await enginePromise;
+  } catch {
+    return;
+  }
+  if (busy) return;
+  setBusy(true, 'busy.generating', { n: specs.length });
+  await nextPaint();
+  const made = [];
+  let failed = 0;
+  try {
+    for (const spec of specs) {
+      let die;
+      try {
+        die = buildDie(manifoldApi(), spec);
+      } catch {
+        failed += 1;
+        continue;
+      }
+      const geometry = new THREE.BufferGeometry();
+      geometry.setAttribute('position', new THREE.BufferAttribute(die.positions, 3));
+      geometry.setIndex(new THREE.BufferAttribute(die.index, 1));
+      const { obj } = addObject(geometry, `d${die.plan.outcomes} ${t(shapeById(spec.shape).shortKey)}`);
+      if (number && fontReady && obj.solid) numberStamps(obj, die);
+      made.push(obj);
+    }
+  } finally {
+    setBusy(false);
+  }
+  if (!made.length) {
+    setStatus('err.generate');
+    return;
+  }
+  layout();
+  activate(made[made.length - 1]);
+  if (made.length > 1) fitScene();
+  else fitCamera();
+  for (const obj of made) {
+    saveModel(obj);
+    saveSource(obj);
+  }
+  saveSession();
+  const stamps = made.reduce((sum, obj) => sum + obj.stamps.length, 0);
+  if (failed) setStatus('status.generatedPartly', { n: made.length, failed });
+  else if (stamps) setStatus('status.generatedNumbered', { n: made.length, stamps });
+  else setStatus('status.generated', { n: made.length });
 }
 
 function safeFileName(name) {
@@ -1026,49 +1458,119 @@ async function saveFile(name, blob, toDir) {
 }
 
 // Welds the mesh, checks it is one closed body and turns the normals outward.
-function tidyModel() {
+function tidyModel(obj) {
   let prepared;
   try {
-    prepared = prepareSolid(diceMesh.geometry, { autoFlip: true });
+    prepared = prepareSolid(obj.mesh.geometry, { autoFlip: true });
   } catch {
     return msg('export.tidyBroken');
   }
-  const before = diceMesh.geometry.getAttribute('position').count;
+  const before = obj.mesh.geometry.getAttribute('position').count;
   const after = prepared.geometry.getAttribute('position').count;
   if (!prepared.flipped && before === after) {
     prepared.geometry.dispose();
     return msg('export.tidyOk');
   }
-  showGeometry(prepared.geometry, true);
-  saveModel();
+  setGeometry(obj, prepared.geometry, true);
+  obj.edited = true;
+  layout();
+  if (obj === active) renderInfo();
+  saveModel(obj);
+  saveSource(obj);
   return msg(prepared.flipped ? 'export.tidyFlipped' : 'export.tidyWelded');
 }
 
-async function exportStl() {
-  if (!diceMesh || busy) return;
-  const toDir = await exportDirReady();
-  const pending = stamps.length;
-  let note;
+// Gets one object ready for writing. Resolves to null when its stamps could not be applied.
+async function finishObject(obj) {
+  const pending = obj.stamps.length;
   if (!ui.auto.checked) {
-    note = pending ? msg('export.pendingLeft', { n: pending }) : msg('export.asIs');
-  } else if (!solidReady || !engineReady) {
-    note = msg(pending ? 'export.brokenPending' : 'export.tidyBroken');
-  } else {
-    if (pending && !(await bake())) return;
-    setBusy(true, 'busy.checking');
-    await nextPaint();
-    try {
-      note = tidyModel();
-    } finally {
-      setBusy(false);
-    }
-    if (pending) note = msg('export.baked', { n: pending, note });
+    return { baked: 0, left: pending, broken: false, note: pending ? msg('export.pendingLeft', { n: pending }) : msg('export.asIs') };
   }
-  const data = exporter.parse(diceMesh, { binary: true });
-  const bytes = new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
-  const name = `${safeFileName(sourceName)}-stamped.stl`;
-  const where = await saveFile(name, new Blob([bytes], { type: 'model/stl' }), toDir);
-  setStatus('status.exported', { file: name, where, note });
+  if (!obj.solid || !engineReady) {
+    return { baked: 0, left: pending, broken: true, note: msg(pending ? 'export.brokenPending' : 'export.tidyBroken') };
+  }
+  if (pending && !(await bake(obj))) return null;
+  setBusy(true, 'busy.checking');
+  await nextPaint();
+  let note;
+  try {
+    note = tidyModel(obj);
+  } finally {
+    setBusy(false);
+  }
+  if (pending) note = msg('export.baked', { n: pending, note });
+  return { baked: pending, left: 0, broken: false, note };
+}
+
+function stlBlob(root) {
+  root.updateMatrixWorld(true);
+  const data = exporter.parse(root, { binary: true });
+  return new Blob([new Uint8Array(data.buffer, data.byteOffset, data.byteLength)], { type: 'model/stl' });
+}
+
+// One object is written in its own coordinates, as the STL it came from was.
+function objectBlob(obj) {
+  return stlBlob(new THREE.Mesh(obj.mesh.geometry));
+}
+
+// Several objects in one file keep the places they have on the scene.
+function sceneBlob(list) {
+  const root = new THREE.Group();
+  for (const obj of list) {
+    const mesh = new THREE.Mesh(obj.mesh.geometry);
+    mesh.position.copy(obj.group.position);
+    root.add(mesh);
+  }
+  return stlBlob(root);
+}
+
+function exportSummary(results) {
+  if (!ui.auto.checked) {
+    return msg('export.summaryRaw', { left: results.reduce((sum, result) => sum + result.left, 0) });
+  }
+  return msg('export.summary', {
+    stamps: results.reduce((sum, result) => sum + result.baked, 0),
+    broken: results.filter((result) => result.broken).length,
+  });
+}
+
+async function exportStl() {
+  if (busy || !objects.length) return;
+  const scope = ui.scope.value;
+  const targets = scope === 'active' ? [active].filter(Boolean) : objects.filter((obj) => obj.group.visible);
+  if (!targets.length) {
+    setStatus('status.nothingToExport');
+    return;
+  }
+  const toDir = await exportDirReady();
+  const results = [];
+  for (const obj of targets) {
+    const result = await finishObject(obj);
+    if (!result) return;
+    results.push(result);
+  }
+  if (scope === 'merged') {
+    const name = 'dice-set.stl';
+    const where = await saveFile(name, sceneBlob(targets), toDir);
+    setStatus('status.exported', { file: name, where, note: exportSummary(results) });
+    return;
+  }
+  if (targets.length === 1) {
+    const name = `${safeFileName(targets[0].name)}-stamped.stl`;
+    const where = await saveFile(name, objectBlob(targets[0]), toDir);
+    setStatus('status.exported', { file: name, where, note: results[0].note });
+    return;
+  }
+  const used = new Set();
+  let where;
+  for (const obj of targets) {
+    const base = safeFileName(obj.name);
+    let name = `${base}-stamped.stl`;
+    for (let n = 2; used.has(name.toLowerCase()); n++) name = `${base}-${n}-stamped.stl`;
+    used.add(name.toLowerCase());
+    where = await saveFile(name, objectBlob(obj), toDir);
+  }
+  setStatus('status.exportedMany', { n: targets.length, where, note: exportSummary(results) });
 }
 
 function showPane(next) {
@@ -1255,6 +1757,9 @@ let cacheOpen = false;
 let cacheWarned = false;
 let saveTimer = 0;
 
+const modelKey = (id) => `model:${id}`;
+const sourceKey = (id) => `source:${id}`;
+
 function store(name, value) {
   return cacheSet(name, value).catch(() => {
     if (cacheWarned) return;
@@ -1277,21 +1782,37 @@ function formData() {
     color: ui.color.value,
     smooth: ui.smooth.checked,
     auto: ui.auto.checked,
+    scope: ui.scope.value,
     symLib: ui.symLib.value,
     symQuery: ui.symQuery.value,
   };
 }
 
+function objectData(obj) {
+  return {
+    id: obj.id,
+    name: obj.name,
+    color: obj.color,
+    visible: obj.group.visible,
+    solid: obj.solid,
+    sourceSolid: obj.sourceSolid,
+    selectedId: obj.selectedId,
+    stamps: obj.stamps.map(stampToData),
+    marks: obj.marks.map((mark) => ({ label: mark.label, normal: mark.normal.slice() })),
+  };
+}
+
+function viewData() {
+  return { position: camera.position.toArray(), target: controls.target.toArray() };
+}
+
 function sessionData() {
   return {
-    name: sourceName,
-    solid: solidReady,
-    sourceSolid,
-    selectedId,
-    stamps: stamps.map(stampToData),
-    marks: marks.map((mark) => ({ label: mark.label, normal: mark.normal.slice() })),
+    v: 2,
+    objects: objects.map(objectData),
+    activeId: active ? active.id : null,
     form: formData(),
-    view: { position: camera.position.toArray(), target: controls.target.toArray() },
+    view: viewData(),
   };
 }
 
@@ -1307,16 +1828,21 @@ function touch() {
   saveTimer = setTimeout(saveSession, 250);
 }
 
-function saveModel() {
-  if (!cacheOpen) return;
-  if (diceMesh) store('model', packGeometry(diceMesh.geometry));
-  else cacheDel('model').catch(() => {});
+function saveModel(obj) {
+  if (cacheOpen) store(modelKey(obj.id), packGeometry(obj.mesh.geometry));
 }
 
-function saveSource() {
+// The source is stored only while it differs from the model; otherwise it is rebuilt from the model.
+function saveSource(obj) {
   if (!cacheOpen) return;
-  if (sourceGeometry) store('source', packGeometry(sourceGeometry));
-  else cacheDel('source').catch(() => {});
+  if (obj.edited && obj.source) store(sourceKey(obj.id), packGeometry(obj.source));
+  else cacheDel(sourceKey(obj.id)).catch(() => {});
+}
+
+function dropCached(obj) {
+  if (!cacheOpen) return;
+  cacheDel(modelKey(obj.id)).catch(() => {});
+  cacheDel(sourceKey(obj.id)).catch(() => {});
 }
 
 function saveFonts() {
@@ -1335,9 +1861,10 @@ function applyForm(form) {
   ui.modeRaise.classList.toggle('is-on', mode === 'raise');
   if (Number.isFinite(form.height) && form.height > 0) setPair(ui.height, ui.heightNum, form.height);
   if (Number.isFinite(form.depth) && form.depth > 0) setPair(ui.depth, ui.depthNum, form.depth);
-  if (typeof form.color === 'string' && /^#[0-9a-f]{6}$/i.test(form.color)) ui.color.value = form.color;
+  if (isColor(form.color)) ui.color.value = form.color;
   ui.smooth.checked = Boolean(form.smooth);
   if (typeof form.auto === 'boolean') ui.auto.checked = form.auto;
+  if (['active', 'each', 'merged'].includes(form.scope)) ui.scope.value = form.scope;
   if (LIBRARIES.some((lib) => lib.id === form.symLib)) ui.symLib.value = form.symLib;
   if (typeof form.symQuery === 'string') ui.symQuery.value = form.symQuery;
   kind = form.kind === 'svg' ? 'svg' : 'text';
@@ -1348,6 +1875,10 @@ function applyForm(form) {
   symbols.items = [];
   if (nextPane === 'symbols') loadSymbols();
   else renderSymbols();
+}
+
+function isColor(value) {
+  return typeof value === 'string' && /^#[0-9a-f]{6}$/i.test(value);
 }
 
 function readMarks(list) {
@@ -1367,73 +1898,120 @@ function vectorFrom(list) {
     : null;
 }
 
-// Rebuilds the whole scene from saved data. Returns how many stamps could not be read.
-function applyScene(session, geometry, source) {
-  clearStamps();
-  clearHistory();
-  removeModel();
-  applyForm(session.form);
+// A scene saved before there could be several objects: one model with its stamps.
+function legacyScene(session, geometry, source) {
+  const form = session.form && typeof session.form === 'object' ? session.form : {};
+  const meta = {
+    id: 1,
+    name: session.name,
+    color: form.color,
+    visible: true,
+    solid: session.solid,
+    sourceSolid: session.sourceSolid,
+    selectedId: session.selectedId,
+    stamps: session.stamps,
+    marks: session.marks,
+  };
+  // The saved camera looked at the model where it used to stand, so it is not carried over.
+  return { objects: geometry ? [{ meta, geometry, source }] : [], activeId: 1, form: session.form, view: null };
+}
+
+function clearScene() {
+  for (const obj of objects) disposeObject(obj);
+  objects = [];
+  active = null;
+  ring.visible = false;
+}
+
+// Rebuilds the whole scene from saved data: { objects: [{ meta, geometry, source }], activeId, form, view }.
+// Returns how many stamps could not be read.
+function applyScene(data) {
+  clearScene();
+  applyForm(data.form);
   let skipped = 0;
-  if (geometry) {
-    sourceName = String(session.name || 'dice');
-    sourceGeometry = source || geometry.clone();
-    sourceSolid = source ? session.sourceSolid !== false : session.solid !== false;
-    showGeometry(geometry, session.solid !== false);
-    diceMesh.material.color.set(ui.color.value);
-    diceMesh.material.flatShading = !ui.smooth.checked;
-    diceMesh.material.needsUpdate = true;
-    marks = readMarks(session.marks);
+  const usedIds = new Set();
+  for (const part of data.objects) {
+    const meta = part.meta && typeof part.meta === 'object' ? part.meta : {};
+    let id = Math.max(1, Math.floor(Number(meta.id)) || 1);
+    while (usedIds.has(id)) id += 1;
+    usedIds.add(id);
+    const obj = createObject(id, uniqueName(meta.name), isColor(meta.color) ? meta.color : ui.color.value);
+    obj.source = part.source || part.geometry.clone();
+    obj.edited = Boolean(part.source);
+    obj.sourceSolid = part.source ? meta.sourceSolid !== false : meta.solid !== false;
+    objects.push(obj);
+    setGeometry(obj, part.geometry, meta.solid !== false);
+    obj.group.visible = meta.visible !== false;
+    obj.marks = readMarks(meta.marks);
 
     const used = new Set();
-    for (const data of Array.isArray(session.stamps) ? session.stamps : []) {
+    for (const saved of Array.isArray(meta.stamps) ? meta.stamps : []) {
       try {
-        const stamp = stampFromData(data);
+        const stamp = stampFromData(saved);
         Object.assign(stamp, shapeFor(stamp.sourceContours, stamp.height));
         while (used.has(stamp.id)) stamp.id += 1;
         used.add(stamp.id);
-        stamps.push(stamp);
-        rebuildPreview(stamp);
+        obj.stamps.push(stamp);
+        rebuildPreview(obj, stamp);
       } catch {
         skipped += 1;
       }
     }
-    stampSeq = stamps.reduce((max, stamp) => Math.max(max, stamp.id), 0) + 1;
+    obj.stampSeq = obj.stamps.reduce((max, stamp) => Math.max(max, stamp.id), 0) + 1;
+    if (obj.stamps.some((stamp) => stamp.id === meta.selectedId)) obj.selectedId = meta.selectedId;
+  }
+  objectSeq = objects.reduce((max, obj) => Math.max(max, obj.id), 0) + 1;
+  layout();
+  activate(objects.find((obj) => obj.id === data.activeId) || objects[0] || null);
 
-    const position = vectorFrom(session.view && session.view.position);
-    const target = vectorFrom(session.view && session.view.target);
-    if (position && target && position.distanceToSquared(target) > 1e-12) {
-      camera.position.copy(position);
-      controls.target.copy(target);
-      setClipping(modelRadius().radius);
-      controls.update();
-    } else {
-      fitCamera();
-    }
-    setHint(session.solid !== false ? 'hint.ready' : 'hint.notSolid');
+  const position = vectorFrom(data.view && data.view.position);
+  const target = vectorFrom(data.view && data.view.target);
+  if (objects.length && position && target && position.distanceToSquared(target) > 1e-12) {
+    camera.position.copy(position);
+    controls.target.copy(target);
+    setClipping(Math.max(sceneBox(false).getSize(new THREE.Vector3()).length() * 0.9, 1));
+    controls.update();
+  } else if (objects.length > 1) {
+    fitScene();
   } else {
-    setHint('hint.start');
+    fitCamera();
   }
-  const chosen = stamps.find((stamp) => stamp.id === session.selectedId);
-  if (chosen) {
-    selectedId = chosen.id;
-    showStampInForm(chosen);
-  }
-  renderList();
-  renderInfo();
   return skipped;
+}
+
+function pendingStamps() {
+  return objects.reduce((sum, obj) => sum + obj.stamps.length, 0);
+}
+
+async function readCachedScene(session) {
+  if (!Array.isArray(session.objects)) {
+    const [model, source] = await Promise.all([cacheGet('model'), cacheGet('source')]);
+    const geometry = model ? unpackGeometry(model) : null;
+    return { legacy: true, data: legacyScene(session, geometry, geometry && source ? unpackGeometry(source) : null) };
+  }
+  const parts = await Promise.all(session.objects.map(async (meta) => {
+    const id = meta && meta.id;
+    const [model, source] = await Promise.all([cacheGet(modelKey(id)), cacheGet(sourceKey(id))]);
+    if (!model) return null;
+    return { meta, geometry: unpackGeometry(model), source: source ? unpackGeometry(source) : null };
+  }));
+  return {
+    legacy: false,
+    data: { objects: parts.filter(Boolean), activeId: session.activeId, form: session.form, view: session.view },
+  };
 }
 
 async function restoreCache() {
   if (!engineReady) return;
   let saved;
   try {
-    saved = await Promise.all(['session', 'model', 'source', 'fonts', 'dir'].map((name) => cacheGet(name)));
+    saved = await Promise.all(['session', 'fonts', 'dir'].map((name) => cacheGet(name)));
   } catch {
     // No IndexedDB (private window, blocked storage): the app works, it just forgets on reload.
     cacheOpen = true;
     return;
   }
-  const [session, model, source, savedFonts, dir] = saved;
+  const [session, savedFonts, dir] = saved;
   for (const entry of Array.isArray(savedFonts) ? savedFonts : []) {
     try {
       addFont(entry);
@@ -1444,39 +2022,50 @@ async function restoreCache() {
   refreshFontList();
   if (dir && canPickDir) exportDir = dir;
   renderDir();
-  // A model opened while the cache was being read wins over the saved scene.
-  if (session && typeof session === 'object' && !diceMesh) {
+  let rewrite = objects.length > 0;
+  if (session && typeof session === 'object') {
     try {
-      const geometry = model ? unpackGeometry(model) : null;
-      const original = geometry && source ? unpackGeometry(source) : null;
-      applyScene(session, geometry, original);
-      if (geometry) setStatus('status.restored', { name: sourceName, n: stamps.length });
+      const { legacy, data } = await readCachedScene(session);
+      // Anything opened while the cache was being read wins over the saved scene.
+      if (!objects.length) {
+        applyScene(data);
+        if (objects.length) setStatus('status.restored', { objects: objects.length, n: pendingStamps() });
+        rewrite = legacy;
+      }
     } catch {
       setStatus('status.cacheBroken');
     }
   }
   cacheOpen = true;
+  if (rewrite) {
+    // Either the scene was made before the cache opened, or it is in the old one-model layout.
+    cacheDel('model').catch(() => {});
+    cacheDel('source').catch(() => {});
+    for (const obj of objects) {
+      saveModel(obj);
+      saveSource(obj);
+    }
+    saveSession();
+  }
 }
 
-function sameArray(a, b) {
-  if (a.length !== b.length) return false;
-  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
-  return true;
+function projectName() {
+  return objects.length === 1 ? objects[0].name : 'dice-set';
 }
 
 async function saveProject() {
-  if (!diceMesh || busy) return;
+  if (!objects.length || busy) return;
   const toDir = await exportDirReady();
-  const model = packGeometry(diceMesh.geometry);
-  const source = sourceGeometry ? packGeometry(sourceGeometry) : null;
-  const sourceIsModel = !source || (sameArray(source.positions, model.positions) && sameArray(source.index, model.index));
   const project = {
     app: PROJECT_APP,
     version: PROJECT_VERSION,
     savedAt: new Date().toISOString(),
-    session: sessionData(),
-    model: encodeGeometry(model),
-    source: sourceIsModel ? null : encodeGeometry(source),
+    session: { activeId: active ? active.id : null, form: formData(), view: viewData() },
+    objects: objects.map((obj) => ({
+      ...objectData(obj),
+      model: encodeGeometry(packGeometry(obj.mesh.geometry)),
+      source: obj.edited && obj.source ? encodeGeometry(packGeometry(obj.source)) : null,
+    })),
     fonts: customFonts().map((entry) => ({
       id: entry.id,
       name: entry.name,
@@ -1485,9 +2074,37 @@ async function saveProject() {
       files: entry.buffers.map(toBase64),
     })),
   };
-  const name = `${safeFileName(sourceName)}${PROJECT_EXT}`;
+  const name = `${safeFileName(projectName())}${PROJECT_EXT}`;
   const where = await saveFile(name, new Blob([JSON.stringify(project)], { type: 'application/json' }), toDir);
-  setStatus('status.projectSaved', { file: name, where, n: stamps.length, fonts: project.fonts.length });
+  setStatus('status.projectSaved', {
+    file: name,
+    where,
+    objects: objects.length,
+    n: pendingStamps(),
+    fonts: project.fonts.length,
+  });
+}
+
+// Decodes a project file into the shape applyScene takes. Throws on anything unreadable.
+function sceneFromProject(project) {
+  if (!Array.isArray(project.objects)) {
+    const geometry = project.model ? unpackGeometry(decodeGeometry(project.model)) : null;
+    const source = geometry && project.source ? unpackGeometry(decodeGeometry(project.source)) : null;
+    return legacyScene(project.session, geometry, source);
+  }
+  return {
+    objects: project.objects.map((entry) => {
+      if (!entry || typeof entry !== 'object') throw new AppError('err.projectBroken');
+      return {
+        meta: entry,
+        geometry: unpackGeometry(decodeGeometry(entry.model)),
+        source: entry.source ? unpackGeometry(decodeGeometry(entry.source)) : null,
+      };
+    }),
+    activeId: project.session.activeId,
+    form: project.session.form,
+    view: project.session.view,
+  };
 }
 
 async function openProject(text) {
@@ -1510,8 +2127,7 @@ async function openProject(text) {
     }
     if (Number(project.version) > PROJECT_VERSION) throw new AppError('err.projectNewer');
     // Everything is decoded before the current scene is touched, so a bad file changes nothing.
-    const geometry = project.model ? unpackGeometry(decodeGeometry(project.model)) : null;
-    const source = geometry && project.source ? unpackGeometry(decodeGeometry(project.source)) : null;
+    const data = sceneFromProject(project);
     for (const entry of Array.isArray(project.fonts) ? project.fonts : []) {
       try {
         addFont({
@@ -1526,32 +2142,29 @@ async function openProject(text) {
       }
     }
     refreshFontList();
-    skipped = applyScene(project.session, geometry, source);
+    for (const obj of objects) dropCached(obj);
+    skipped = applyScene(data);
   } catch (error) {
     setStatus(errorMsg(error, 'err.projectBroken'));
     return;
   }
-  saveModel();
-  saveSource();
+  for (const obj of objects) {
+    saveModel(obj);
+    saveSource(obj);
+  }
   saveFonts();
   saveSession();
-  if (skipped || badFonts) setStatus('status.projectPartly', { name: sourceName, stamps: skipped, fonts: badFonts });
-  else setStatus('status.projectOpened', { name: sourceName, n: stamps.length });
+  if (skipped || badFonts) setStatus('status.projectPartly', { stamps: skipped, fonts: badFonts });
+  else setStatus('status.projectOpened', { objects: objects.length, n: pendingStamps() });
 }
 
 function newProject() {
-  if (!diceMesh || busy) return;
+  if (!objects.length || busy) return;
   if (!window.confirm(t('project.newConfirm'))) return;
-  clearStamps();
-  clearHistory();
-  removeModel();
-  sourceName = 'dice';
-  renderInfo();
-  syncButtons();
-  setHint('hint.start');
+  for (const obj of objects) dropCached(obj);
+  clearScene();
+  activate(null);
   setStatus('status.cleared');
-  saveModel();
-  saveSource();
   saveSession();
 }
 
@@ -1600,7 +2213,9 @@ function applyTheme(name) {
     // Private mode: the theme lasts for this visit.
   }
   scene.background = new THREE.Color(cssVar('--scene', '#2a241c'));
+  ring.material.color.set(cssVar('--accent', '#e2b15a'));
   roller.refresh();
+  generator.refresh();
   if (symbols.phase === 'ready') renderSymbols();
 }
 
@@ -1622,18 +2237,21 @@ function redrawTexts() {
   ui.busy.querySelector('span').textContent = render(live.busy);
   renderPresets();
   renderInfo();
+  renderObjects();
   renderList();
   renderDir();
   roller.refresh();
+  generator.refresh();
 }
 
 function openRoll() {
-  if (!diceMesh || busy) return;
-  let geometry = diceMesh.geometry;
+  const obj = active;
+  if (!obj || busy) return;
+  let geometry = obj.mesh.geometry;
   let temporary = null;
-  if (stamps.length && solidReady && engineReady) {
+  if (obj.stamps.length && obj.solid && engineReady) {
     try {
-      temporary = applyStamps(diceMesh.geometry, stampJobs());
+      temporary = applyStamps(obj.mesh.geometry, stampJobs(obj));
       geometry = temporary;
     } catch {
       // The tray then shows the die without the signs that are not applied yet.
@@ -1641,9 +2259,9 @@ function openRoll() {
   }
   roller.open({
     geometry,
-    color: ui.color.value,
+    color: obj.color,
     flat: !ui.smooth.checked,
-    marks: marks.concat(stamps.map(markOf)),
+    marks: obj.marks.concat(obj.stamps.map(markOf)),
   });
   if (temporary) temporary.dispose();
 }
@@ -1709,22 +2327,34 @@ ui.sample.addEventListener('click', async () => {
 });
 
 ui.color.addEventListener('input', () => {
-  if (diceMesh) diceMesh.material.color.set(ui.color.value);
+  if (active) {
+    active.color = ui.color.value;
+    active.mesh.material.color.set(ui.color.value);
+  }
   touch();
 });
 
 ui.smooth.addEventListener('change', () => {
+  for (const obj of objects) {
+    obj.mesh.material.flatShading = !ui.smooth.checked;
+    obj.mesh.material.needsUpdate = true;
+  }
   touch();
-  if (!diceMesh) return;
-  diceMesh.material.flatShading = !ui.smooth.checked;
-  diceMesh.material.needsUpdate = true;
 });
 
-ui.flip.addEventListener('click', () => {
-  if (diceMesh) adoptGeometry(flipWinding(diceMesh.geometry), sourceName, false, false);
+ui.name.addEventListener('input', () => {
+  if (!active) return;
+  active.name = ui.name.value.replace(/\s+/g, ' ').trim() || 'dice';
+  renderObjects();
+  touch();
 });
 
+ui.gen.addEventListener('click', () => {
+  if (!busy) generator.open();
+});
+ui.flip.addEventListener('click', flipActive);
 ui.fit.addEventListener('click', fitCamera);
+ui.fitAll.addEventListener('click', fitScene);
 ui.tabText.addEventListener('click', () => setPane('text'));
 ui.tabSvg.addEventListener('click', () => setPane('svg'));
 ui.tabSymbols.addEventListener('click', () => setPane('symbols'));
@@ -1751,10 +2381,11 @@ ui.symLib.addEventListener('change', () => {
   loadSymbols();
 });
 ui.symQuery.addEventListener('input', scheduleSymbolSearch);
-ui.apply.addEventListener('click', bake);
+ui.apply.addEventListener('click', () => bake());
 ui.undo.addEventListener('click', undo);
 ui.reset.addEventListener('click', resetSource);
 ui.auto.addEventListener('change', touch);
+ui.scope.addEventListener('change', touch);
 ui.dir.addEventListener('click', pickDir);
 ui.dirClear.addEventListener('click', clearDir);
 ui.download.addEventListener('click', exportStl);
@@ -1791,15 +2422,15 @@ function queueMove(event) {
 // Raycasts at most once per frame: big STLs make every ray expensive.
 function flushMove() {
   moveFrame = 0;
-  if (!lastMove || !diceMesh) return;
+  if (!lastMove || !active) return;
   const { x, y } = lastMove;
   if (press && press.stamp) {
-    if (press.dragging) dragTo(press.stamp, x + press.dx, y + press.dy);
+    if (press.dragging) dragTo(press.object, press.stamp, x + press.dx, y + press.dy);
     return;
   }
   if (press) return;
-  const hit = stamps.length ? hitAt(x, y) : null;
-  canvas.style.cursor = hit && stampUnder(hit.point) ? 'grab' : '';
+  const hit = active.stamps.length ? hitAt(x, y) : null;
+  canvas.style.cursor = hit && hit.object === active && stampUnder(active, hit.point) ? 'grab' : '';
 }
 
 function endStampPress(done, event) {
@@ -1808,8 +2439,10 @@ function endStampPress(done, event) {
   moveFrame = 0;
   canvas.style.cursor = '';
   if (!done.dragging) return;
-  if (event && diceMesh) dragTo(done.stamp, event.clientX + done.dx, event.clientY + done.dy);
-  if (done.stamp.id === selectedId) {
+  const alive = objects.includes(done.object) && done.object.stamps.includes(done.stamp);
+  if (!alive) return;
+  if (event) dragTo(done.object, done.stamp, event.clientX + done.dx, event.clientY + done.dy);
+  if (done.object === active && done.stamp.id === active.selectedId) {
     formLock = true;
     ui.offU.value = '0';
     ui.offV.value = '0';
@@ -1822,13 +2455,15 @@ function endStampPress(done, event) {
 // Capture phase: this must run before OrbitControls so a grabbed stamp does not also spin the camera.
 canvas.addEventListener('pointerdown', (event) => {
   if (event.button !== 0 || (press && press.stamp)) return;
-  press = { id: event.pointerId, x: event.clientX, y: event.clientY, stamp: null, dragging: false };
-  if (busy || !diceMesh || event.shiftKey || !stamps.length) return;
+  press = { id: event.pointerId, x: event.clientX, y: event.clientY, object: null, stamp: null, dragging: false };
+  if (busy || !active || event.shiftKey || !active.stamps.length) return;
   const hit = hitAt(event.clientX, event.clientY);
-  const stamp = hit && stampUnder(hit.point);
+  const stamp = hit && hit.object === active && stampUnder(active, hit.point);
   if (!stamp) return;
   // Keep the grab point under the cursor instead of snapping the stamp centre to it.
-  const anchor = screenPoint(new THREE.Vector3().setFromMatrixPosition(placementMatrix(stamp)));
+  const centre = new THREE.Vector3().setFromMatrixPosition(placementMatrix(stamp));
+  const anchor = screenPoint(active.group.localToWorld(centre));
+  press.object = active;
   press.stamp = stamp;
   press.dx = anchor.x - event.clientX;
   press.dy = anchor.y - event.clientY;
@@ -1838,7 +2473,7 @@ canvas.addEventListener('pointerdown', (event) => {
   } catch {
     // The pointer can already be gone; the drag still works inside the canvas.
   }
-  if (selectedId !== stamp.id) selectStamp(stamp.id);
+  if (active.selectedId !== stamp.id) selectStamp(stamp.id);
 }, { capture: true });
 
 canvas.addEventListener('pointermove', (event) => {
@@ -1864,13 +2499,19 @@ canvas.addEventListener('pointerup', (event) => {
     endStampPress(done, event);
     return;
   }
-  if (!wasClick || busy || !diceMesh) return;
+  if (!wasClick || busy || !objects.length) return;
   const hit = hitAt(event.clientX, event.clientY);
   if (!hit) {
     setStatus('status.missedModel');
     return;
   }
-  if (!solidReady) {
+  if (hit.object !== active) {
+    // The first click on another object only picks it, so a stamp never lands on the wrong die.
+    setActive(hit.object);
+    setStatus('status.objectPicked', { name: hit.object.name });
+    return;
+  }
+  if (!active.solid) {
     // A stamp could never be applied to an open mesh, so it is not placed at all.
     setStatus('model.notSolid');
     return;
@@ -1891,6 +2532,10 @@ window.addEventListener('keydown', (event) => {
     if (event.key === 'Escape') roller.close();
     return;
   }
+  if (generator.isOpen()) {
+    if (event.key === 'Escape') generator.close();
+    return;
+  }
   if (event.key === 'Escape') {
     deselect();
     return;
@@ -1898,9 +2543,9 @@ window.addEventListener('keydown', (event) => {
   const tag = document.activeElement && document.activeElement.tagName;
   if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
   if (event.key === 'Delete' || event.key === 'Backspace') {
-    if (selectedId != null) {
+    if (active && active.selectedId != null) {
       event.preventDefault();
-      removeStamp(selectedId);
+      removeStamp(active.selectedId);
     }
   } else if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'z') {
     event.preventDefault();
@@ -1908,9 +2553,11 @@ window.addEventListener('keydown', (event) => {
   }
 });
 
+const dialogOpen = () => roller.isOpen() || generator.isOpen();
+
 window.addEventListener('dragover', (event) => {
   event.preventDefault();
-  if (!roller.isOpen()) ui.drop.hidden = false;
+  if (!dialogOpen()) ui.drop.hidden = false;
 });
 window.addEventListener('dragleave', (event) => {
   if (event.target === document.documentElement) ui.drop.hidden = true;
@@ -1918,7 +2565,7 @@ window.addEventListener('dragleave', (event) => {
 window.addEventListener('drop', (event) => {
   event.preventDefault();
   ui.drop.hidden = true;
-  if (roller.isOpen()) return;
+  if (dialogOpen()) return;
   const file = event.dataTransfer && event.dataTransfer.files && event.dataTransfer.files[0];
   if (file) openFile(file);
 });
