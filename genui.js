@@ -2,7 +2,7 @@
 
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
-import { t } from './i18n.js?v=5';
+import { t } from './i18n.js?v=6';
 import {
   SHAPES,
   CAPS,
@@ -12,7 +12,7 @@ import {
   planDie,
   buildDie,
   fitHeight,
-} from './dicegen.js?v=5';
+} from './dicegen.js?v=6';
 
 const SETTINGS_KEY = 'dice.gen';
 const MAX_BATCH = 12;
@@ -257,6 +257,7 @@ export function createGenerator({ engine, onAdd }) {
       if (shape.kind === 'ends') lines.push(t('gen.info.ends'));
       lines.push(t(plan.top ? 'gen.info.top' : 'gen.info.bottom'));
     }
+    if (shape.themed) lines.push(t('gen.info.themed'));
     return lines.join(' ');
   }
 

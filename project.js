@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { AppError } from './i18n.js?v=5';
+import { AppError } from './i18n.js?v=6';
 
 export const PROJECT_APP = 'dnd-dice-stamp';
 // Version 2 holds several objects; version 1 files with a single model still open.

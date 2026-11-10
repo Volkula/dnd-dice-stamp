@@ -3,7 +3,7 @@
 
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
-import { t } from './i18n.js?v=5';
+import { t } from './i18n.js?v=6';
 
 const RAPIER_URL = 'https://cdn.jsdelivr.net/npm/@dimforge/rapier3d-compat@0.14.0/rapier.es.js';
 const STEP = 1 / 240;
@@ -18,6 +18,8 @@ const QUIET_SPIN = 0.6;
 const QUIET_TIME = 0.35;
 // A top face must look up at least this close to how squarely the bottom one looks down.
 const EDGE_MARGIN = 0.0015;
+// How much more squarely a blank face may look up than the sign that is read.
+const TILT = 0.12;
 const TRAY = { width: 30, depth: 20, wall: 4, thick: 1.2, sky: 70 };
 const VIEW_DIRECTION = new THREE.Vector3(0, -34, 32).normalize();
 const SETTINGS_KEY = 'dice.roll';
@@ -461,11 +463,21 @@ export function createRoller() {
       if (dot > flatTop) flatTop = dot;
       if (-dot > flatBottom) flatBottom = -dot;
     }
-    if (flatTop >= flatBottom - EDGE_MARGIN) {
-      // A face is on top. Below 0.6 the die leans on an edge and no sign is "up".
-      return topDot >= flatTop - 0.01 && topDot > 0.6 ? top.label : null;
+    if (topDot >= -bottomDot - EDGE_MARGIN) {
+      // A sign looks up at least as squarely as any looks down, so the die is read from the top.
+      // Below 0.6 it leans on an edge and no sign is "up". A blank face that looks up much more
+      // squarely than the sign means the die shows nothing; a little more is fine: a goblet or
+      // a cauldron lies tilted, and the number on its belly is still the one on top.
+      if (topDot <= 0.6 || topDot < flatTop - TILT) return null;
+      // Two different faces equally close to the top: the die sits on an edge between them.
+      for (const mark of marks) {
+        if (mark.label !== top.label && mark.normal.dot(up) > topDot - 0.02 && mark.normal.dot(top.normal) < 0.999) return null;
+      }
+      return top.label;
     }
-    // A d4 or a die with an odd number of faces shows an edge or a corner: it is read by the face it lies on.
+    // A d4 or a die with an odd number of faces shows an edge or a corner: it is read by the face
+    // it lies on. That holds only when no face at all looks straight up.
+    if (flatTop >= flatBottom - EDGE_MARGIN) return null;
     return -bottomDot >= flatBottom - 0.01 && -bottomDot > 0.9 ? bottom.label : null;
   }
 

@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { STLLoader } from 'three/addons/loaders/STLLoader.js';
 import { STLExporter } from 'three/addons/exporters/STLExporter.js';
-import { artworkFromSvg, fitContours } from './geom2d.js?v=5';
+import { artworkFromSvg, fitContours } from './geom2d.js?v=6';
 import {
   initManifold,
   localToolGeometry,
@@ -11,7 +11,7 @@ import {
   flipWinding,
   signedVolume,
   manifoldApi,
-} from './stamp.js?v=5';
+} from './stamp.js?v=6';
 import {
   LANGS,
   AppError,
@@ -24,8 +24,8 @@ import {
   onLangChange,
   applyI18n,
   locale,
-} from './i18n.js?v=5';
-import { cacheGet, cacheSet, cacheDel } from './store.js?v=5';
+} from './i18n.js?v=6';
+import { cacheGet, cacheSet, cacheDel } from './store.js?v=6';
 import {
   DEFAULT_FONT,
   EMOJI_CSS_FAMILY,
@@ -41,11 +41,11 @@ import {
   customFonts,
   needsEmoji,
   layoutText,
-} from './fonts.js?v=5';
-import { LIBRARIES, library, loadLibrary, searchItems } from './symbols.js?v=5';
-import { createRoller } from './roll.js?v=5';
-import { buildDie, fitHeight, shapeById } from './dicegen.js?v=5';
-import { createGenerator } from './genui.js?v=5';
+} from './fonts.js?v=6';
+import { LIBRARIES, library, loadLibrary, searchItems } from './symbols.js?v=6';
+import { createRoller } from './roll.js?v=6';
+import { buildDie, fitHeight, shapeById } from './dicegen.js?v=6';
+import { createGenerator } from './genui.js?v=6';
 import {
   PROJECT_APP,
   PROJECT_VERSION,
@@ -58,7 +58,7 @@ import {
   decodeGeometry,
   stampToData,
   stampFromData,
-} from './project.js?v=5';
+} from './project.js?v=6';
 
 const THEMES = ['midnight', 'day', 'contrast', 'sepia'];
 const THEME_KEY = 'dice.theme';
