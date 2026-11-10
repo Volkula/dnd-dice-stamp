@@ -2,7 +2,7 @@
 
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
-import { t } from './i18n.js?v=6';
+import { t } from './i18n.js?v=7';
 import {
   SHAPES,
   CAPS,
@@ -12,7 +12,7 @@ import {
   planDie,
   buildDie,
   fitHeight,
-} from './dicegen.js?v=6';
+} from './dicegen.js?v=7';
 
 const SETTINGS_KEY = 'dice.gen';
 const MAX_BATCH = 12;

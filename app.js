@@ -2,7 +2,8 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { STLLoader } from 'three/addons/loaders/STLLoader.js';
 import { STLExporter } from 'three/addons/exporters/STLExporter.js';
-import { artworkFromSvg, fitContours } from './geom2d.js?v=6';
+import { MeshBVH } from 'three-mesh-bvh';
+import { artworkFromSvg, fitContours } from './geom2d.js?v=7';
 import {
   initManifold,
   localToolGeometry,
@@ -11,7 +12,7 @@ import {
   flipWinding,
   signedVolume,
   manifoldApi,
-} from './stamp.js?v=6';
+} from './stamp.js?v=7';
 import {
   LANGS,
   AppError,
@@ -24,8 +25,8 @@ import {
   onLangChange,
   applyI18n,
   locale,
-} from './i18n.js?v=6';
-import { cacheGet, cacheSet, cacheDel } from './store.js?v=6';
+} from './i18n.js?v=7';
+import { cacheGet, cacheSet, cacheDel } from './store.js?v=7';
 import {
   DEFAULT_FONT,
   EMOJI_CSS_FAMILY,
@@ -41,11 +42,11 @@ import {
   customFonts,
   needsEmoji,
   layoutText,
-} from './fonts.js?v=6';
-import { LIBRARIES, library, loadLibrary, searchItems } from './symbols.js?v=6';
-import { createRoller } from './roll.js?v=6';
-import { buildDie, fitHeight, shapeById } from './dicegen.js?v=6';
-import { createGenerator } from './genui.js?v=6';
+} from './fonts.js?v=7';
+import { LIBRARIES, library, loadLibrary, searchItems } from './symbols.js?v=7';
+import { createRoller } from './roll.js?v=7';
+import { buildDie, fitHeight, shapeById } from './dicegen.js?v=7';
+import { createGenerator } from './genui.js?v=7';
 import {
   PROJECT_APP,
   PROJECT_VERSION,
@@ -58,7 +59,7 @@ import {
   decodeGeometry,
   stampToData,
   stampFromData,
-} from './project.js?v=6';
+} from './project.js?v=7';
 
 const THEMES = ['midnight', 'day', 'contrast', 'sepia'];
 const THEME_KEY = 'dice.theme';
@@ -143,6 +144,7 @@ const ui = {
   rotationNum: $('rotation-num'),
   offU: $('off-u'),
   offV: $('off-v'),
+  wrap: $('wrap'),
   list: $('stamps'),
   deselect: $('btn-deselect'),
   apply: $('btn-apply'),
@@ -462,6 +464,9 @@ function createObject(id, name, color) {
     history: [],
     previews: new Map(),
     timers: new Map(),
+    refits: new Map(),
+    // The search tree for signs that follow the relief, built on first use.
+    relief: null,
   };
   mesh.userData.owner = obj;
   return obj;
@@ -546,6 +551,8 @@ function uniqueName(wanted) {
 function clearStamps(obj) {
   for (const timer of obj.timers.values()) clearTimeout(timer);
   obj.timers.clear();
+  for (const timer of obj.refits.values()) clearTimeout(timer);
+  obj.refits.clear();
   for (const mesh of obj.previews.values()) {
     obj.group.remove(mesh);
     mesh.geometry.dispose();
@@ -815,6 +822,71 @@ function rotationFor(normal, up) {
   return Math.round(THREE.MathUtils.radToDeg(angle) * 100) / 100;
 }
 
+// The search tree over the object's mesh, rebuilt when the mesh is replaced.
+function reliefOf(obj) {
+  const geometry = obj.mesh.geometry;
+  if (!obj.relief || obj.relief.geometry !== geometry) {
+    obj.relief = { geometry, tree: new MeshBVH(geometry, { indirect: true }) };
+  }
+  return obj.relief.tree;
+}
+
+const probeRay = new THREE.Ray();
+
+// Height of the model over the stamp's plane at a point of that plane. Null where there is
+// nothing under the point, or where the nearest surface is far from the stamp: on a goblet
+// that is the foot seen past the edge of the bowl, and the sign must not drop down to it.
+function surfaceUnder(obj, stamp) {
+  const tree = reliefOf(obj);
+  const matrix = placementMatrix(stamp);
+  const x = new THREE.Vector3();
+  const y = new THREE.Vector3();
+  const z = new THREE.Vector3();
+  matrix.extractBasis(x, y, z);
+  const origin = new THREE.Vector3().setFromMatrixPosition(matrix);
+  const reach = Math.max(stamp.halfWidth, stamp.halfHeight) + stamp.depth;
+  const down = z.clone().negate();
+  return (u, v) => {
+    probeRay.origin.copy(origin).addScaledVector(x, u).addScaledVector(y, v).addScaledVector(z, reach);
+    probeRay.direction.copy(down);
+    const hit = tree.raycastFirst(probeRay, THREE.FrontSide);
+    return hit && hit.distance <= reach * 2 ? reach - hit.distance : null;
+  };
+}
+
+// On a rough surface the triangle under the cursor may look anywhere, and a sign laid along it
+// would stand askew. The stamp then takes the average direction of the surface under it.
+// On a die with flat faces a good part of the neighbourhood lies in the clicked face even when
+// the sign hangs over its edges, and then the face keeps the say: the sign stays square to it.
+function settledNormal(obj, stamp, hit) {
+  const tree = reliefOf(obj);
+  const { x, y, z } = stampBasis(hit.normal);
+  const radius = Math.max(stamp.halfWidth, stamp.halfHeight);
+  const sum = new THREE.Vector3();
+  let seen = 0;
+  let agree = 0;
+  const spots = [[0, 0]];
+  for (const [ring, count] of [[0.5, 6], [1, 10]]) {
+    for (let i = 0; i < count; i++) {
+      const angle = (i / count) * Math.PI * 2;
+      spots.push([ring * radius * Math.cos(angle), ring * radius * Math.sin(angle)]);
+    }
+  }
+  probeRay.direction.copy(z).negate();
+  for (const [u, v] of spots) {
+    probeRay.origin.copy(hit.point).addScaledVector(x, u).addScaledVector(y, v).addScaledVector(z, radius);
+    const found = tree.raycastFirst(probeRay, THREE.FrontSide);
+    if (!found || found.distance > radius * 2) continue;
+    seen += 1;
+    if (found.face.normal.dot(z) > 0.996) agree += 1;
+    sum.add(found.face.normal);
+  }
+  if (!seen || agree >= seen * 0.3 || sum.lengthSq() < 1e-8) return hit.normal;
+  sum.normalize();
+  // A direction that looks away from the clicked triangle would put the sign on edge.
+  return sum.dot(z) > 0.5 ? sum : hit.normal;
+}
+
 function stampJobs(obj) {
   return obj.stamps.map((stamp) => ({
     contours: stamp.contours,
@@ -822,6 +894,7 @@ function stampJobs(obj) {
     depth: stamp.depth,
     mode: stamp.mode,
     matrix: Array.from(placementMatrix(stamp).elements),
+    surface: stamp.wrap ? surfaceUnder(obj, stamp) : null,
   }));
 }
 
@@ -842,7 +915,8 @@ function positionPreview(obj, stamp) {
 function rebuildPreview(obj, stamp) {
   let geometry;
   try {
-    geometry = localToolGeometry(stamp.contours, stamp.fillRule, stamp.depth, stamp.mode);
+    const surface = stamp.wrap ? surfaceUnder(obj, stamp) : null;
+    geometry = localToolGeometry(stamp.contours, stamp.fillRule, stamp.depth, stamp.mode, surface);
   } catch (error) {
     setStatus(errorMsg(error, 'err.stampBuild'));
     return;
@@ -880,6 +954,19 @@ function shapeFor(sourceContours, height) {
 function scheduleRebuild(obj, stamp) {
   clearTimeout(obj.timers.get(stamp.id));
   obj.timers.set(stamp.id, setTimeout(() => rebuildPreview(obj, stamp), 40));
+}
+
+// A sign that follows the relief changes shape as it moves. During a drag it is rebuilt
+// a few times a second rather than on every pointer event.
+function refitSoon(obj, stamp) {
+  if (!stamp.wrap || obj.refits.has(stamp.id)) return;
+  obj.refits.set(
+    stamp.id,
+    setTimeout(() => {
+      obj.refits.delete(stamp.id);
+      if (obj.stamps.includes(stamp)) rebuildPreview(obj, stamp);
+    }, 50),
+  );
 }
 
 function stampName(stamp) {
@@ -956,6 +1043,7 @@ function showStampInForm(stamp) {
   setPair(ui.rotation, ui.rotationNum, stamp.rotation);
   ui.offU.value = String(stamp.offsetU);
   ui.offV.value = String(stamp.offsetV);
+  ui.wrap.checked = Boolean(stamp.wrap);
   formLock = false;
 }
 
@@ -1045,9 +1133,11 @@ async function placeStamp(hit) {
     rotation: 0,
     offsetU: 0,
     offsetV: 0,
+    wrap: ui.wrap.checked,
     point: hit.point.clone(),
     normal: hit.normal.clone(),
   };
+  if (stamp.wrap) stamp.normal.copy(settledNormal(obj, stamp, hit));
   obj.stamps.push(stamp);
   obj.selectedId = stamp.id;
   rebuildPreview(obj, stamp);
@@ -1066,8 +1156,9 @@ async function placeStamp(hit) {
 // Sits the stamp on the surface under the hit and tilts it to that face.
 function seatStamp(obj, stamp, hit) {
   stamp.point.copy(hit.point);
-  stamp.normal.copy(hit.normal);
+  stamp.normal.copy(stamp.wrap ? settledNormal(obj, stamp, hit) : hit.normal);
   positionPreview(obj, stamp);
+  refitSoon(obj, stamp);
 }
 
 function moveSelected(hit) {
@@ -1147,10 +1238,13 @@ function onGeomInput() {
   if (!stamp) return;
   const nextHeight = Math.max(0.05, num(ui.height));
   const nextDepth = Math.max(0.02, num(ui.depth));
-  const shape = nextHeight !== stamp.height || nextDepth !== stamp.depth || mode !== stamp.mode;
+  const wrap = ui.wrap.checked;
+  // A sign that follows the relief is rebuilt on any change: a turn or a shift puts it over other bumps.
+  const shape = nextHeight !== stamp.height || nextDepth !== stamp.depth || mode !== stamp.mode || wrap || stamp.wrap;
   stamp.height = nextHeight;
   stamp.depth = nextDepth;
   stamp.mode = mode;
+  stamp.wrap = wrap;
   stamp.rotation = num(ui.rotation);
   stamp.offsetU = num(ui.offU);
   stamp.offsetV = num(ui.offV);
@@ -1205,7 +1299,11 @@ function stampUnder(obj, point) {
     const pad = stamp.height * 0.15;
     if (Math.abs(local.x) > stamp.halfWidth + pad) continue;
     if (Math.abs(local.y) > stamp.halfHeight + pad) continue;
-    if (Math.abs(local.z) > Math.max(stamp.height * 0.35, stamp.depth * 1.5)) continue;
+    // A sign that follows the relief lies well off its own plane wherever the surface bends.
+    const off = stamp.wrap
+      ? Math.max(stamp.halfWidth, stamp.halfHeight) + stamp.depth
+      : Math.max(stamp.height * 0.35, stamp.depth * 1.5);
+    if (Math.abs(local.z) > off) continue;
     const distance = Math.hypot(local.x, local.y);
     if (distance < bestDistance) {
       best = stamp;
@@ -1270,8 +1368,11 @@ function undo() {
   obj.solid = true;
   obj.stats = measure(previous.geometry);
   // The stamps of that step come back as editable ones, next to any placed since.
-  obj.stamps = previous.stamps.concat(obj.stamps);
+  const placedSince = obj.stamps;
+  obj.stamps = previous.stamps.concat(placedSince);
   for (const stamp of previous.stamps) rebuildPreview(obj, stamp);
+  // The relief under the later stamps has changed too.
+  for (const stamp of placedSince) if (stamp.wrap) rebuildPreview(obj, stamp);
   layout();
   renderList();
   renderInfo();
@@ -1354,6 +1455,7 @@ function numberStamps(obj, die) {
       rotation: rotationFor(normal, new THREE.Vector3().fromArray(face.up)),
       offsetU: 0,
       offsetV: 0,
+      wrap: ui.wrap.checked,
       point: new THREE.Vector3().fromArray(face.center),
       normal,
     });
@@ -1779,6 +1881,7 @@ function formData() {
     mode,
     height: num(ui.height),
     depth: num(ui.depth),
+    wrap: ui.wrap.checked,
     color: ui.color.value,
     smooth: ui.smooth.checked,
     auto: ui.auto.checked,
@@ -1861,6 +1964,7 @@ function applyForm(form) {
   ui.modeRaise.classList.toggle('is-on', mode === 'raise');
   if (Number.isFinite(form.height) && form.height > 0) setPair(ui.height, ui.heightNum, form.height);
   if (Number.isFinite(form.depth) && form.depth > 0) setPair(ui.depth, ui.depthNum, form.depth);
+  if (typeof form.wrap === 'boolean') ui.wrap.checked = form.wrap;
   if (isColor(form.color)) ui.color.value = form.color;
   ui.smooth.checked = Boolean(form.smooth);
   if (typeof form.auto === 'boolean') ui.auto.checked = form.auto;
@@ -2401,6 +2505,7 @@ bindPair(ui.depth, ui.depthNum, onGeomInput);
 bindPair(ui.rotation, ui.rotationNum, onGeomInput);
 ui.offU.addEventListener('input', onGeomInput);
 ui.offV.addEventListener('input', onGeomInput);
+ui.wrap.addEventListener('change', onGeomInput);
 
 const canvas = renderer.domElement;
 const CLICK_SLOP = 9;

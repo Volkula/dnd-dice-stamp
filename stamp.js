@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { mergeVertices } from 'three/addons/utils/BufferGeometryUtils.js';
 import Module from 'manifold-3d';
-import { AppError } from './i18n.js?v=6';
+import { AppError } from './i18n.js?v=7';
 
 const WASM = 'https://cdn.jsdelivr.net/npm/manifold-3d@3.5.4/manifold.wasm';
 
@@ -59,8 +59,142 @@ function extrudeLocal(contours, fillRule, depth, mode) {
   }
 }
 
-export function localToolGeometry(contours, fillRule, depth, mode) {
-  const solid = extrudeLocal(contours, fillRule, depth, mode);
+// How finely a sign that follows the relief is cut up: its longer side over this many steps.
+const WRAP_STEPS = 40;
+
+// A quick look before the costly cutting-up: the outline of the sign and a grid over its box.
+// On the flat face of an ordinary die every one of these points lies in the stamp's plane.
+function looksFlat(contours, min, max, surface, tolerance) {
+  const level = (x, y) => {
+    const height = surface(x, y);
+    return height !== null && Math.abs(height) < tolerance;
+  };
+  let points = 0;
+  for (const contour of contours) points += contour.length;
+  const skip = Math.max(1, Math.ceil(points / 400));
+  for (const contour of contours) {
+    for (let i = 0; i < contour.length; i += skip) {
+      if (!level(contour[i][0], contour[i][1])) return false;
+    }
+  }
+  const cells = 8;
+  for (let i = 0; i <= cells; i++) {
+    for (let j = 0; j <= cells; j++) {
+      const x = min[0] + ((max[0] - min[0]) * i) / cells;
+      const y = min[1] + ((max[1] - min[1]) * j) / cells;
+      if (!level(x, y)) return false;
+    }
+  }
+  return true;
+}
+
+// The tool for a sign that follows the relief. surface(x, y) is the height of the model over
+// the stamp's plane, or null where there is nothing under that point. Every part of the sign
+// keeps the same depth below the surface (or height above it), so a bump cannot bury it and
+// a dip cannot leave it uncut.
+// Returns null when the surface under the sign is flat: the plain prism does the same job.
+// shell: for the preview, a cut is shown as a skin on the surface, not as the block that removes it.
+function wrapLocal(contours, fillRule, depth, mode, surface, shell) {
+  const { Manifold, Mesh } = api;
+  const made = [];
+  try {
+    const section = sectionFrom(contours, fillRule);
+    made.push(section);
+    const { min, max } = section.bounds();
+    const extent = Math.max(max[0] - min[0], max[1] - min[1]);
+    if (!(extent > 0)) return null;
+    if (looksFlat(contours, min, max, surface, extent * 1e-3)) return null;
+    const step = extent / WRAP_STEPS;
+    const slab = section.extrude(step);
+    made.push(slab);
+    const fine = slab.refineToLength(step);
+    made.push(fine);
+    const mesh = fine.getMesh();
+    const stride = mesh.numProp;
+    const source = mesh.vertProperties;
+    const count = source.length / stride;
+
+    // The top and the bottom of the slab share their outline, so each spot is measured once.
+    const known = new Map();
+    const spots = [];
+    const spotOf = new Uint32Array(count);
+    for (let i = 0; i < count; i++) {
+      const x = source[i * stride];
+      const y = source[i * stride + 1];
+      const key = `${x},${y}`;
+      let spot = known.get(key);
+      if (spot === undefined) {
+        spot = spots.length;
+        known.set(key, spot);
+        const height = surface(x, y);
+        spots.push({ x, y, height: Number.isFinite(height) ? height : null });
+      }
+      spotOf[i] = spot;
+    }
+    const found = spots.filter((spot) => spot.height !== null);
+    if (!found.length) return null;
+    let lowest = Infinity;
+    let highest = -Infinity;
+    for (const spot of found) {
+      lowest = Math.min(lowest, spot.height);
+      highest = Math.max(highest, spot.height);
+    }
+    if (highest - lowest < extent * 1e-3 && Math.abs(highest) < extent * 1e-3) return null;
+    // Where the sign hangs over an edge of the model it carries on at the height of the nearest part that does not.
+    for (const spot of spots) {
+      if (spot.height !== null) continue;
+      let nearest = Infinity;
+      for (const other of found) {
+        const distance = (other.x - spot.x) ** 2 + (other.y - spot.y) ** 2;
+        if (distance < nearest) {
+          nearest = distance;
+          spot.filled = other.height;
+        }
+      }
+    }
+
+    const eps = Math.max(0.02, depth * 0.08);
+    // The surface is known only at the spots; between them the tool must still reach past it.
+    const slack = Math.max(eps, step * 0.5);
+    const positions = new Float32Array(count * 3);
+    for (let i = 0; i < count; i++) {
+      const spot = spots[spotOf[i]];
+      const height = spot.height !== null ? spot.height : spot.filled;
+      let low;
+      let high;
+      if (mode === 'raise') {
+        low = height - slack;
+        high = height + depth;
+      } else {
+        low = height - depth;
+        high = shell ? height + eps : highest + slack;
+      }
+      const t = Math.min(1, Math.max(0, source[i * stride + 2] / step));
+      positions[i * 3] = spot.x;
+      positions[i * 3 + 1] = spot.y;
+      positions[i * 3 + 2] = low + (high - low) * t;
+    }
+    const tool = new Manifold(new Mesh({ numProp: 3, vertProperties: positions, triVerts: mesh.triVerts }));
+    if (tool.status() !== 'NoError') {
+      const status = tool.status();
+      tool.delete();
+      throw statusError(status);
+    }
+    return tool;
+  } finally {
+    for (const object of made) object.delete();
+  }
+}
+
+function toolFor(contours, fillRule, depth, mode, surface, shell) {
+  const wrapped = surface ? wrapLocal(contours, fillRule, depth, mode, surface, shell) : null;
+  return wrapped || extrudeLocal(contours, fillRule, depth, mode);
+}
+
+// The stamp as it is drawn over the model before it is applied.
+// With a surface function the sign follows the relief, see wrapLocal.
+export function localToolGeometry(contours, fillRule, depth, mode, surface = null) {
+  const solid = toolFor(contours, fillRule, depth, mode, surface, true);
   try {
     return meshToGeometry(solid.getMesh());
   } finally {
@@ -205,7 +339,7 @@ export function applyStamps(geometry, jobs) {
 
     jobs.forEach((job, index) => {
       try {
-        const tool = track(extrudeLocal(job.contours, job.fillRule, job.depth, job.mode));
+        const tool = track(toolFor(job.contours, job.fillRule, job.depth, job.mode, job.surface, false));
         const world = track(tool.transform(job.matrix));
         const next = track(job.mode === 'raise' ? current.add(world) : current.subtract(world));
         const status = next.status();

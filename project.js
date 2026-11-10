@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { AppError } from './i18n.js?v=6';
+import { AppError } from './i18n.js?v=7';
 
 export const PROJECT_APP = 'dnd-dice-stamp';
 // Version 2 holds several objects; version 1 files with a single model still open.
@@ -95,6 +95,7 @@ export function stampToData(stamp) {
     rotation: stamp.rotation,
     offsetU: stamp.offsetU,
     offsetV: stamp.offsetV,
+    wrap: Boolean(stamp.wrap),
     point: stamp.point.toArray(),
     normal: stamp.normal.toArray(),
   };
@@ -135,6 +136,9 @@ export function stampFromData(data) {
     rotation: finite(data.rotation, 0),
     offsetU: finite(data.offsetU, 0),
     offsetV: finite(data.offsetV, 0),
+    // Stamps saved before signs could follow the relief get it too: on a flat face nothing
+    // changes, and on a rough one the sign stops sinking into the bumps.
+    wrap: data.wrap !== false,
     point: vector(data.point),
     normal: normal.normalize(),
   };

@@ -77,6 +77,8 @@ const ru = {
   'how.rotation': 'Поворот на грани',
   'how.offsetX': 'Сдвиг по грани X',
   'how.note': 'Клик по модели ставит новый штамп. Поставленный штамп тянется мышью: он скользит по поверхности и ложится по её наклону. Знак, размер и поворот правятся у выбранного штампа. Esc снимает выбор.',
+  'how.wrap': 'По рельефу',
+  'how.wrapNote': 'Знак повторяет поверхность под собой: на неровной модели он везде одной глубины и не тонет в буграх. Без галочки знак плоский.',
 
   'stamps.title': 'Штампы',
   'stamps.deselect': 'Снять выбор',
@@ -366,6 +368,8 @@ const en = {
   'how.rotation': 'Rotation on the face',
   'how.offsetX': 'Shift along the face X',
   'how.note': 'A click on the model places a new stamp. A placed stamp can be dragged: it slides over the surface and follows its slope. The sign, size and rotation are edited on the selected stamp. Esc clears the selection.',
+  'how.wrap': 'Follow the surface',
+  'how.wrapNote': 'The sign follows the surface under it: on an uneven model it keeps one depth everywhere and does not sink into the bumps. Without the tick the sign is flat.',
 
   'stamps.title': 'Stamps',
   'stamps.deselect': 'Clear selection',
@@ -655,6 +659,8 @@ const de = {
   'how.rotation': 'Drehung auf der Fläche',
   'how.offsetX': 'Versatz auf der Fläche X',
   'how.note': 'Ein Klick auf das Modell setzt einen neuen Stempel. Ein gesetzter Stempel lässt sich mit der Maus ziehen: Er gleitet über die Oberfläche und folgt ihrer Neigung. Zeichen, Größe und Drehung werden am gewählten Stempel geändert. Esc hebt die Auswahl auf.',
+  'how.wrap': 'Dem Relief folgen',
+  'how.wrapNote': 'Das Zeichen folgt der Oberfläche darunter: Auf einem unebenen Modell bleibt es überall gleich tief und versinkt nicht in den Buckeln. Ohne Haken ist das Zeichen flach.',
 
   'stamps.title': 'Stempel',
   'stamps.deselect': 'Auswahl aufheben',

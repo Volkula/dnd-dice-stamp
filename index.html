@@ -12,12 +12,13 @@
       document.documentElement.dataset.theme = themes.indexOf(saved) >= 0 ? saved : 'midnight';
     })();
   </script>
-  <link rel="stylesheet" href="./styles.css?v=6">
+  <link rel="stylesheet" href="./styles.css?v=7">
   <script type="importmap">
   {
     "imports": {
       "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
       "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/",
+      "three-mesh-bvh": "https://cdn.jsdelivr.net/npm/three-mesh-bvh@0.8.3/build/index.module.js",
       "manifold-3d": "https://cdn.jsdelivr.net/npm/manifold-3d@3.5.4/manifold.js",
       "opentype.js": "https://cdn.jsdelivr.net/npm/opentype.js@1.3.4/dist/opentype.module.js"
     }
@@ -201,6 +202,8 @@
               <input id="off-v" type="number" step="0.1" value="0">
             </label>
           </div>
+          <label class="check"><input id="wrap" type="checkbox" checked> <span data-i18n="how.wrap">По рельефу</span></label>
+          <p class="muted" data-i18n="how.wrapNote">Знак повторяет поверхность под собой: на неровной модели он везде одной глубины и не тонет в буграх. Без галочки знак плоский.</p>
           <p class="muted" data-i18n="how.note">Клик по модели ставит новый штамп. Поставленный штамп тянется мышью: он скользит по поверхности и ложится по её наклону. Знак, размер и поворот правятся у выбранного штампа. Esc снимает выбор.</p>
         </section>
 
@@ -310,7 +313,7 @@
     </div>
   </div>
 
-  <script type="module" src="./app.js?v=6"></script>
+  <script type="module" src="./app.js?v=7"></script>
   <script>
     setTimeout(function () {
       if (window.__diceApp) return;

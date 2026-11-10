@@ -1,6 +1,6 @@
 // 2D contours for text and SVG. Y grows down in source data; callers flip to Y-up.
 
-import { AppError } from './i18n.js?v=6';
+import { AppError } from './i18n.js?v=7';
 
 const NUM = '[-+]?(?:\\d*\\.\\d+|\\d+)(?:[eE][-+]?\\d+)?';
 const TOKEN = new RegExp(`[MmLlHhVvCcSsQqTtAaZz]|${NUM}`, 'g');
