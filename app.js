@@ -56,6 +56,7 @@ const ui = {
   paneSvg: $('pane-svg'),
   text: $('text'),
   svg: $('svg'),
+  editNote: $('edit-note'),
   presets: $('presets'),
   modeCut: $('mode-cut'),
   modeRaise: $('mode-raise'),
@@ -124,6 +125,18 @@ const cutMat = new THREE.MeshStandardMaterial({
 });
 const raiseMat = cutMat.clone();
 raiseMat.color.set(0xe2b15a);
+const cutMatOn = cutMat.clone();
+cutMatOn.opacity = 0.92;
+cutMatOn.emissive.set(0x8a2f16);
+const raiseMatOn = raiseMat.clone();
+raiseMatOn.opacity = 0.92;
+raiseMatOn.emissive.set(0x7a5512);
+
+function previewMaterial(stamp) {
+  const on = stamp.id === selectedId;
+  if (stamp.mode === 'raise') return on ? raiseMatOn : raiseMat;
+  return on ? cutMatOn : cutMat;
+}
 
 let font = null;
 let engineReady = false;
@@ -195,7 +208,11 @@ function syncButtons() {
   ui.undo.disabled = history.length === 0 || busy;
   ui.reset.disabled = !sourceGeometry || busy;
   ui.download.disabled = !hasMesh || busy;
-  ui.deselect.hidden = !selectedStamp();
+  const selected = selectedStamp();
+  ui.deselect.hidden = !selected;
+  ui.editNote.textContent = selected
+    ? 'Правится выбранный штамп: изменения сразу видны на модели.'
+    : 'Этот знак встанет по следующему клику на модели.';
 }
 
 function formatSize(geometry) {
@@ -294,7 +311,7 @@ async function adoptGeometry(raw, name, asSource, autoFlip = true) {
   fitCamera();
   const note = prepared.flipped ? ' Нормали смотрели внутрь, развернул их.' : '';
   setStatus(`Модель на сцене.${note} Кликните по грани, чтобы поставить знак.`);
-  setHint('Клик — новый штамп, Shift+клик — перенести выбранный');
+  setHint('Клик — новый штамп. Поставленный штамп тянется мышью по поверхности');
 }
 
 async function loadArrayBuffer(buffer, name) {
@@ -357,7 +374,7 @@ function rebuildPreview(stamp) {
   }
   let mesh = previews.get(stamp.id);
   if (!mesh) {
-    mesh = new THREE.Mesh(geometry, stamp.mode === 'raise' ? raiseMat : cutMat);
+    mesh = new THREE.Mesh(geometry, previewMaterial(stamp));
     mesh.raycast = () => {};
     const arrow = new THREE.ArrowHelper(new THREE.Vector3(0, 0, 1), new THREE.Vector3(), 1, 0xf3eee6, 0.3, 0.16);
     mesh.add(arrow);
@@ -366,9 +383,23 @@ function rebuildPreview(stamp) {
   } else {
     mesh.geometry.dispose();
     mesh.geometry = geometry;
-    mesh.material = stamp.mode === 'raise' ? raiseMat : cutMat;
+    mesh.material = previewMaterial(stamp);
   }
   positionPreview(stamp);
+}
+
+// Fitted contours are centred on the origin, so the footprint is symmetric.
+function shapeFor(sourceContours, height) {
+  const contours = fitContours(sourceContours, height);
+  let halfWidth = 0;
+  let halfHeight = 0;
+  for (const contour of contours) {
+    for (const [x, y] of contour) {
+      halfWidth = Math.max(halfWidth, Math.abs(x));
+      halfHeight = Math.max(halfHeight, Math.abs(y));
+    }
+  }
+  return { contours, halfWidth, halfHeight };
 }
 
 function scheduleRebuild(stamp) {
@@ -410,7 +441,18 @@ function renderList() {
     item.append(note);
     ui.list.append(item);
   }
+  for (const stamp of stamps) {
+    const mesh = previews.get(stamp.id);
+    if (mesh) mesh.material = previewMaterial(stamp);
+  }
   syncButtons();
+}
+
+function deselect() {
+  if (selectedId == null) return;
+  selectedId = null;
+  renderList();
+  setStatus('Выбор снят. Следующий клик по модели поставит новый штамп.');
 }
 
 function selectStamp(id) {
@@ -418,6 +460,9 @@ function selectStamp(id) {
   if (!stamp) return;
   selectedId = id;
   formLock = true;
+  setKind(stamp.kind);
+  if (stamp.kind === 'text') ui.text.value = stamp.source;
+  else ui.svg.value = stamp.source;
   mode = stamp.mode;
   ui.modeCut.classList.toggle('is-on', mode === 'cut');
   ui.modeRaise.classList.toggle('is-on', mode === 'raise');
@@ -428,7 +473,7 @@ function selectStamp(id) {
   ui.offV.value = String(stamp.offsetV);
   formLock = false;
   renderList();
-  setStatus(`Выбран штамп «${stampLabel(stamp)}». Сдвиньте его ползунками или Shift+кликом.`);
+  setStatus(`Выбран штамп «${stampLabel(stamp)}». Правьте знак в поле, тяните штамп мышью по модели.`);
 }
 
 function removeStamp(id) {
@@ -473,9 +518,9 @@ function placeStamp(hit) {
     return;
   }
   const height = Math.max(0.05, num(ui.height));
-  let contours;
+  let shape;
   try {
-    contours = fitContours(artwork.contours, height);
+    shape = shapeFor(artwork.contours, height);
   } catch (error) {
     setStatus(error.message);
     return;
@@ -486,7 +531,7 @@ function placeStamp(hit) {
     kind: artwork.kind,
     source: artwork.source,
     sourceContours: artwork.contours,
-    contours,
+    ...shape,
     fillRule: artwork.fillRule,
     mode,
     height,
@@ -509,17 +554,72 @@ function placeStamp(hit) {
   if (artwork.missing && artwork.missing.length) {
     setStatus(`В шрифте нет: ${artwork.missing.join(' ')}. Такой знак лучше принести SVG.`);
   } else {
-    setStatus('Штамп стоит на грани. Можно крутить его или нанести на модель.');
+    setStatus('Штамп стоит на грани. Его можно тянуть мышью, править знак в поле или нанести на модель.');
   }
+}
+
+// Sits the stamp on the surface under the hit and tilts it to that face.
+function seatStamp(stamp, hit) {
+  stamp.point.copy(hit.point);
+  stamp.normal.copy(hit.face.normal).transformDirection(diceMesh.matrixWorld).normalize();
+  positionPreview(stamp);
 }
 
 function moveSelected(hit) {
   const stamp = selectedStamp();
   if (!stamp) return;
-  stamp.point.copy(hit.point);
-  stamp.normal.copy(hit.face.normal).transformDirection(diceMesh.matrixWorld).normalize();
-  positionPreview(stamp);
+  seatStamp(stamp, hit);
   setStatus('Штамп перенесён.');
+}
+
+let sourceTimer = 0;
+
+function scheduleSourceEdit() {
+  if (formLock || selectedId == null) return;
+  const id = selectedId;
+  clearTimeout(sourceTimer);
+  sourceTimer = setTimeout(() => {
+    if (selectedId === id) applySourceEdit();
+  }, 120);
+}
+
+// Rebuilds the selected stamp from whatever is in the active sign field.
+function applySourceEdit() {
+  const stamp = selectedStamp();
+  if (!stamp) return false;
+  let artwork;
+  let shape;
+  try {
+    artwork = readArtwork();
+    shape = shapeFor(artwork.contours, stamp.height);
+  } catch (error) {
+    setStatus(`${error.message} Штамп пока прежний.`);
+    return false;
+  }
+  Object.assign(stamp, shape, {
+    kind: artwork.kind,
+    source: artwork.source,
+    sourceContours: artwork.contours,
+    fillRule: artwork.fillRule,
+  });
+  rebuildPreview(stamp);
+  renderList();
+  if (artwork.missing && artwork.missing.length) {
+    setStatus(`В шрифте нет: ${artwork.missing.join(' ')}. Такой знак лучше принести SVG.`);
+  } else {
+    setStatus('Знак выбранного штампа обновлён.');
+  }
+  return true;
+}
+
+function useSvg(text, label) {
+  ui.svg.value = text;
+  setKind('svg');
+  if (selectedStamp()) {
+    if (applySourceEdit()) setStatus(`${label} теперь на выбранном штампе.`);
+  } else {
+    setStatus(`${label} в поле. Кликните по грани.`);
+  }
 }
 
 function onGeomInput() {
@@ -537,7 +637,7 @@ function onGeomInput() {
   stamp.offsetV = num(ui.offV);
   if (shape) {
     try {
-      stamp.contours = fitContours(stamp.sourceContours, stamp.height);
+      Object.assign(stamp, shapeFor(stamp.sourceContours, stamp.height));
     } catch (error) {
       setStatus(error.message);
       return;
@@ -549,13 +649,53 @@ function onGeomInput() {
   renderList();
 }
 
-function hitFromEvent(event) {
+function hitAt(clientX, clientY) {
   const rect = renderer.domElement.getBoundingClientRect();
-  pointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
-  pointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+  pointer.x = ((clientX - rect.left) / rect.width) * 2 - 1;
+  pointer.y = -((clientY - rect.top) / rect.height) * 2 + 1;
   raycaster.setFromCamera(pointer, camera);
   const hits = raycaster.intersectObject(diceMesh, false);
-  return hits[0] || null;
+  const hit = hits[0];
+  return hit && hit.face ? hit : null;
+}
+
+function screenPoint(world) {
+  const rect = renderer.domElement.getBoundingClientRect();
+  const ndc = world.clone().project(camera);
+  return {
+    x: rect.left + ((ndc.x + 1) / 2) * rect.width,
+    y: rect.top + ((1 - ndc.y) / 2) * rect.height,
+  };
+}
+
+// Picks by the stamp's padded bounding box: thin glyphs would be hard to grab exactly.
+function stampUnder(point) {
+  const local = new THREE.Vector3();
+  let best = null;
+  let bestDistance = Infinity;
+  for (const stamp of stamps) {
+    local.copy(point).applyMatrix4(placementMatrix(stamp).invert());
+    const pad = stamp.height * 0.15;
+    if (Math.abs(local.x) > stamp.halfWidth + pad) continue;
+    if (Math.abs(local.y) > stamp.halfHeight + pad) continue;
+    if (Math.abs(local.z) > Math.max(stamp.height * 0.35, stamp.depth * 1.5)) continue;
+    const distance = Math.hypot(local.x, local.y);
+    if (distance < bestDistance) {
+      best = stamp;
+      bestDistance = distance;
+    }
+  }
+  return best;
+}
+
+function dragTo(stamp, clientX, clientY) {
+  const hit = hitAt(clientX, clientY);
+  if (!hit) return false;
+  // The slider offsets live in the old face's plane, so the drag absorbs them.
+  stamp.offsetU = 0;
+  stamp.offsetV = 0;
+  seatStamp(stamp, hit);
+  return true;
 }
 
 async function bake() {
@@ -689,10 +829,9 @@ ui.tabText.addEventListener('click', () => setKind('text'));
 ui.tabSvg.addEventListener('click', () => setKind('svg'));
 ui.modeCut.addEventListener('click', () => setMode('cut'));
 ui.modeRaise.addEventListener('click', () => setMode('raise'));
-ui.deselect.addEventListener('click', () => {
-  selectedId = null;
-  renderList();
-});
+ui.deselect.addEventListener('click', deselect);
+ui.text.addEventListener('input', scheduleSourceEdit);
+ui.svg.addEventListener('input', scheduleSourceEdit);
 ui.apply.addEventListener('click', bake);
 ui.undo.addEventListener('click', undo);
 ui.reset.addEventListener('click', resetSource);
@@ -707,38 +846,112 @@ ui.offV.addEventListener('input', onGeomInput);
 ui.fileSvg.addEventListener('change', () => {
   const file = ui.fileSvg.files && ui.fileSvg.files[0];
   if (!file) return;
-  file.text().then((text) => {
-    ui.svg.value = text;
-    setKind('svg');
-    setStatus(`SVG «${file.name}» в поле. Кликните по грани.`);
-  });
+  file.text().then((text) => useSvg(text, `SVG «${file.name}»`));
 });
 
 for (const preset of PRESETS) {
   const button = document.createElement('button');
   button.type = 'button';
   button.textContent = preset.name;
-  button.addEventListener('click', () => {
-    ui.svg.value = preset.svg;
-    setKind('svg');
-    setStatus(`Заготовка «${preset.name}». Кликните по грани.`);
-  });
+  button.addEventListener('click', () => useSvg(preset.svg, `Заготовка «${preset.name}»`));
   ui.presets.append(button);
 }
 
-let down = null;
-renderer.domElement.addEventListener('pointerdown', (event) => {
-  if (event.button !== 0) return;
-  down = { x: event.clientX, y: event.clientY };
+const canvas = renderer.domElement;
+const CLICK_SLOP = 9;
+let press = null;
+let moveFrame = 0;
+let lastMove = null;
+
+function movedFar(event) {
+  const dx = event.clientX - press.x;
+  const dy = event.clientY - press.y;
+  return dx * dx + dy * dy > CLICK_SLOP;
+}
+
+function queueMove(event) {
+  lastMove = { x: event.clientX, y: event.clientY };
+  if (!moveFrame) moveFrame = requestAnimationFrame(flushMove);
+}
+
+// Raycasts at most once per frame: big STLs make every ray expensive.
+function flushMove() {
+  moveFrame = 0;
+  if (!lastMove || !diceMesh) return;
+  const { x, y } = lastMove;
+  if (press && press.stamp) {
+    if (press.dragging) dragTo(press.stamp, x + press.dx, y + press.dy);
+    return;
+  }
+  if (press) return;
+  const hit = stamps.length ? hitAt(x, y) : null;
+  canvas.style.cursor = hit && stampUnder(hit.point) ? 'grab' : '';
+}
+
+function endStampPress(done, event) {
+  controls.enabled = true;
+  cancelAnimationFrame(moveFrame);
+  moveFrame = 0;
+  canvas.style.cursor = '';
+  if (!done.dragging) return;
+  if (event) dragTo(done.stamp, event.clientX + done.dx, event.clientY + done.dy);
+  if (done.stamp.id === selectedId) {
+    formLock = true;
+    ui.offU.value = '0';
+    ui.offV.value = '0';
+    formLock = false;
+  }
+  setStatus('Штамп перенесён и лёг по поверхности.');
+}
+
+// Capture phase: this must run before OrbitControls so a grabbed stamp does not also spin the camera.
+canvas.addEventListener('pointerdown', (event) => {
+  if (event.button !== 0 || (press && press.stamp)) return;
+  press = { id: event.pointerId, x: event.clientX, y: event.clientY, stamp: null, dragging: false };
+  if (busy || !diceMesh || event.shiftKey || !stamps.length) return;
+  const hit = hitAt(event.clientX, event.clientY);
+  const stamp = hit && stampUnder(hit.point);
+  if (!stamp) return;
+  // Keep the grab point under the cursor instead of snapping the stamp centre to it.
+  const anchor = screenPoint(new THREE.Vector3().setFromMatrixPosition(placementMatrix(stamp)));
+  press.stamp = stamp;
+  press.dx = anchor.x - event.clientX;
+  press.dy = anchor.y - event.clientY;
+  controls.enabled = false;
+  try {
+    canvas.setPointerCapture(event.pointerId);
+  } catch {
+    // The pointer can already be gone; the drag still works inside the canvas.
+  }
+  if (selectedId !== stamp.id) selectStamp(stamp.id);
+}, { capture: true });
+
+canvas.addEventListener('pointermove', (event) => {
+  if (press && press.stamp) {
+    if (event.pointerId !== press.id) return;
+    if (!press.dragging) {
+      if (!movedFar(event)) return;
+      press.dragging = true;
+      canvas.style.cursor = 'grabbing';
+    }
+    queueMove(event);
+    return;
+  }
+  if (event.buttons === 0 && !busy) queueMove(event);
 });
-renderer.domElement.addEventListener('pointerup', (event) => {
-  if (!down || event.button !== 0 || busy || !diceMesh) return;
-  const dx = event.clientX - down.x;
-  const dy = event.clientY - down.y;
-  down = null;
-  if (dx * dx + dy * dy > 9) return;
-  const hit = hitFromEvent(event);
-  if (!hit || !hit.face) {
+
+canvas.addEventListener('pointerup', (event) => {
+  if (!press || event.pointerId !== press.id || event.button !== 0) return;
+  const done = press;
+  const wasClick = !movedFar(event);
+  press = null;
+  if (done.stamp) {
+    endStampPress(done, event);
+    return;
+  }
+  if (!wasClick || busy || !diceMesh) return;
+  const hit = hitAt(event.clientX, event.clientY);
+  if (!hit) {
     setStatus('Клик мимо модели.');
     return;
   }
@@ -746,7 +959,18 @@ renderer.domElement.addEventListener('pointerup', (event) => {
   else placeStamp(hit);
 });
 
+canvas.addEventListener('pointercancel', (event) => {
+  if (!press || event.pointerId !== press.id) return;
+  const done = press;
+  press = null;
+  if (done.stamp) endStampPress(done, null);
+});
+
 window.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape') {
+    deselect();
+    return;
+  }
   const tag = document.activeElement && document.activeElement.tagName;
   if (tag === 'INPUT' || tag === 'TEXTAREA') return;
   if (event.key === 'Delete' || event.key === 'Backspace') {
@@ -773,11 +997,7 @@ window.addEventListener('drop', (event) => {
   const file = event.dataTransfer && event.dataTransfer.files && event.dataTransfer.files[0];
   if (!file) return;
   if (/\.svg$/i.test(file.name)) {
-    file.text().then((text) => {
-      ui.svg.value = text;
-      setKind('svg');
-      setStatus(`SVG «${file.name}» в поле.`);
-    });
+    file.text().then((text) => useSvg(text, `SVG «${file.name}»`));
     return;
   }
   if (/\.stl$/i.test(file.name)) {
