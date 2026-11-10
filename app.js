@@ -2,8 +2,7 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { STLLoader } from 'three/addons/loaders/STLLoader.js';
 import { STLExporter } from 'three/addons/exporters/STLExporter.js';
-import opentype from 'opentype.js';
-import { artworkFromSvg, artworkFromText, fitContours } from './geom2d.js';
+import { artworkFromSvg, fitContours } from './geom2d.js?v=4';
 import {
   initManifold,
   localToolGeometry,
@@ -11,25 +10,74 @@ import {
   applyStamps,
   flipWinding,
   signedVolume,
-} from './stamp.js';
+} from './stamp.js?v=4';
+import {
+  LANGS,
+  AppError,
+  t,
+  msg,
+  render,
+  errorMsg,
+  getLang,
+  setLang,
+  onLangChange,
+  applyI18n,
+  locale,
+} from './i18n.js?v=4';
+import { cacheGet, cacheSet, cacheDel } from './store.js?v=4';
+import {
+  DEFAULT_FONT,
+  EMOJI_CSS_FAMILY,
+  loadBuiltinFont,
+  ensureEmoji,
+  listFonts,
+  hasFont,
+  fontName,
+  addFont,
+  addFontFromFile,
+  addFontFromUrl,
+  removeFont,
+  customFonts,
+  needsEmoji,
+  layoutText,
+} from './fonts.js?v=4';
+import { LIBRARIES, library, loadLibrary, searchItems } from './symbols.js?v=4';
+import { createRoller } from './roll.js?v=4';
+import {
+  PROJECT_APP,
+  PROJECT_VERSION,
+  PROJECT_EXT,
+  toBase64,
+  fromBase64,
+  packGeometry,
+  unpackGeometry,
+  encodeGeometry,
+  decodeGeometry,
+  stampToData,
+  stampFromData,
+} from './project.js?v=4';
 
-const FONT_URL = 'https://cdn.jsdelivr.net/gh/googlefonts/roboto@2.138/src/hinted/Roboto-Regular.ttf';
+const THEMES = ['midnight', 'day', 'contrast', 'sepia'];
+const THEME_KEY = 'dice.theme';
+const HISTORY_LIMIT = 8;
+const EMOJI_LIMIT = 240;
+const ICON_LIMIT = 120;
 
 const PRESETS = [
   {
-    name: 'Круг',
+    key: 'preset.circle',
     svg: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><circle cx="50" cy="50" r="42"/></svg>',
   },
   {
-    name: 'Кольцо',
+    key: 'preset.ring',
     svg: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><path fill-rule="evenodd" d="M50 8a42 42 0 1 1 0 84a42 42 0 1 1 0-84zm0 22a20 20 0 1 0 0 40a20 20 0 1 0 0-40z"/></svg>',
   },
   {
-    name: 'Звезда',
+    key: 'preset.star',
     svg: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><polygon points="50,6 61,38 96,38 68,58 79,92 50,72 21,92 32,58 4,38 39,38"/></svg>',
   },
   {
-    name: 'Треугольник',
+    key: 'preset.triangle',
     svg: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><polygon points="50,8 94,88 6,88"/></svg>',
   },
 ];
@@ -42,6 +90,12 @@ const ui = {
   drop: $('drop'),
   busy: $('busy'),
   stage: $('stage'),
+  lang: $('lang'),
+  theme: $('theme'),
+  roll: $('btn-roll'),
+  fileProject: $('file-project'),
+  saveProject: $('btn-save-project'),
+  newProject: $('btn-new'),
   fileStl: $('file-stl'),
   fileSvg: $('file-svg'),
   sample: $('btn-sample'),
@@ -52,12 +106,25 @@ const ui = {
   fit: $('btn-fit'),
   tabText: $('tab-text'),
   tabSvg: $('tab-svg'),
+  tabSymbols: $('tab-symbols'),
   paneText: $('pane-text'),
   paneSvg: $('pane-svg'),
+  paneSymbols: $('pane-symbols'),
   text: $('text'),
+  font: $('font'),
+  fontRemove: $('btn-font-remove'),
+  fileFont: $('file-font'),
+  fontUrl: $('font-url'),
+  fontLoad: $('btn-font-url'),
   svg: $('svg'),
   editNote: $('edit-note'),
   presets: $('presets'),
+  symLib: $('sym-lib'),
+  symQuery: $('sym-query'),
+  symInfo: $('sym-info'),
+  symGrid: $('sym-grid'),
+  symCredit: $('sym-credit'),
+  symNow: $('sym-now'),
   modeCut: $('mode-cut'),
   modeRaise: $('mode-raise'),
   height: $('height'),
@@ -73,12 +140,20 @@ const ui = {
   apply: $('btn-apply'),
   undo: $('btn-undo'),
   reset: $('btn-reset'),
+  auto: $('auto'),
+  dir: $('btn-dir'),
+  dirClear: $('btn-dir-clear'),
+  dirName: $('dir-name'),
   download: $('btn-download'),
   status: $('status'),
 };
 
+function cssVar(name, fallback) {
+  return getComputedStyle(document.documentElement).getPropertyValue(name).trim() || fallback;
+}
+
 const scene = new THREE.Scene();
-scene.background = new THREE.Color('#2a241c');
+scene.background = new THREE.Color(cssVar('--scene', '#2a241c'));
 scene.add(new THREE.HemisphereLight(0xfff4e4, 0x3a3026, 0.9));
 const key = new THREE.DirectionalLight(0xfff8ee, 1.5);
 key.position.set(50, -90, 80);
@@ -111,6 +186,7 @@ const raycaster = new THREE.Raycaster();
 const pointer = new THREE.Vector2();
 const loader = new STLLoader();
 const exporter = new STLExporter();
+const roller = createRoller();
 
 const cutMat = new THREE.MeshStandardMaterial({
   color: 0xe07a5f,
@@ -138,38 +214,73 @@ function previewMaterial(stamp) {
   return on ? cutMatOn : cutMat;
 }
 
-let font = null;
 let engineReady = false;
+let fontReady = false;
+// What the next click stamps: 'text' reads the text field, 'svg' the SVG field.
 let kind = 'text';
+// Which tab is open. The symbol picker is a third tab that feeds one of the two fields.
+let pane = 'text';
+let svgLabel = '';
 let mode = 'cut';
 let formLock = false;
 let diceMesh = null;
 let sourceGeometry = null;
+let sourceSolid = false;
 let sourceName = 'dice';
 let solidReady = false;
+let modelStats = null;
 let stamps = [];
 let selectedId = null;
+// Baked stamps as { label, normal }: the tray reads a throw by the mark that faces up.
+let marks = [];
 let history = [];
 let stampSeq = 1;
 let busy = false;
+let exportDir = null;
+const canPickDir = typeof window.showDirectoryPicker === 'function';
 const previews = new Map();
 const rebuildTimers = new Map();
 
+// Shown texts are kept as message keys so a language switch can redraw them.
+const live = {
+  status: msg('status.start'),
+  hint: msg('hint.start'),
+  engine: msg('engine.loading'),
+  busy: msg('busy.working'),
+};
+
 window.__diceApp = true;
 
-function setStatus(text) {
-  ui.status.textContent = text;
+function asMessage(keyOrMessage, params) {
+  return typeof keyOrMessage === 'string' ? msg(keyOrMessage, params) : keyOrMessage;
 }
 
-function setHint(text) {
-  ui.hint.textContent = text;
+function setStatus(keyOrMessage, params) {
+  live.status = asMessage(keyOrMessage, params);
+  ui.status.textContent = render(live.status);
 }
 
-function setBusy(on, label) {
+function setHint(keyOrMessage, params) {
+  live.hint = asMessage(keyOrMessage, params);
+  ui.hint.textContent = render(live.hint);
+}
+
+function setEngine(keyOrMessage) {
+  live.engine = asMessage(keyOrMessage);
+  ui.engine.textContent = render(live.engine);
+}
+
+function setBusy(on, keyOrMessage, params) {
   busy = on;
+  if (keyOrMessage) live.busy = asMessage(keyOrMessage, params);
+  ui.busy.querySelector('span').textContent = render(live.busy);
   ui.busy.hidden = !on;
-  if (label) ui.busy.querySelector('span').textContent = label;
   syncButtons();
+}
+
+// Lets the overlay paint before a long synchronous calculation blocks the page.
+function nextPaint() {
+  return new Promise((resolve) => setTimeout(resolve, 30));
 }
 
 function num(input) {
@@ -200,49 +311,86 @@ function selectedStamp() {
   return stamps.find((stamp) => stamp.id === selectedId) || null;
 }
 
+function signSummary() {
+  if (kind === 'svg') return svgLabel || 'SVG';
+  return ui.text.value.replace(/\s+/g, ' ').trim().slice(0, 24) || '—';
+}
+
 function syncButtons() {
   const hasMesh = Boolean(diceMesh);
   ui.flip.disabled = !hasMesh || busy;
   ui.fit.disabled = !hasMesh || busy;
+  ui.roll.disabled = !hasMesh || busy;
+  ui.saveProject.disabled = !hasMesh || busy;
+  ui.newProject.disabled = !hasMesh || busy;
   ui.apply.disabled = !hasMesh || !solidReady || !engineReady || stamps.length === 0 || busy;
   ui.undo.disabled = history.length === 0 || busy;
   ui.reset.disabled = !sourceGeometry || busy;
   ui.download.disabled = !hasMesh || busy;
+  ui.fontRemove.disabled = !hasFont(ui.font.value) || ui.font.value === DEFAULT_FONT;
   const selected = selectedStamp();
   ui.deselect.hidden = !selected;
-  ui.editNote.textContent = selected
-    ? 'Правится выбранный штамп: изменения сразу видны на модели.'
-    : 'Этот знак встанет по следующему клику на модели.';
+  ui.editNote.textContent = t(selected ? 'sign.noteEditing' : 'sign.noteNext');
+  ui.symNow.textContent = t('sym.now', { what: signSummary() });
 }
 
-function formatSize(geometry) {
+function formatNumber(n) {
+  const a = Math.abs(n);
+  const digits = a >= 100 ? 0 : a >= 10 ? 1 : 2;
+  return Number(n.toFixed(digits)).toLocaleString(locale());
+}
+
+function measure(geometry) {
   geometry.computeBoundingBox();
   const size = geometry.boundingBox.getSize(new THREE.Vector3());
-  const fmt = (n) => {
-    const a = Math.abs(n);
-    if (a >= 100) return n.toFixed(0);
-    if (a >= 10) return n.toFixed(1);
-    return n.toFixed(2);
+  const position = geometry.getAttribute('position');
+  modelStats = {
+    size,
+    triangles: Math.round((geometry.index ? geometry.index.count : position.count) / 3),
+    volume: Math.abs(signedVolume(geometry)),
   };
-  const tris = geometry.index ? geometry.index.count / 3 : geometry.getAttribute('position').count / 3;
-  const volume = Math.abs(signedVolume(geometry));
-  return `${fmt(size.x)} × ${fmt(size.y)} × ${fmt(size.z)} · ${Math.round(tris).toLocaleString('ru-RU')} треуг. · объём ${fmt(volume)}`;
+}
+
+function renderInfo() {
+  if (!diceMesh || !modelStats) {
+    ui.info.textContent = t('model.none');
+    return;
+  }
+  const text = t('model.info', {
+    x: formatNumber(modelStats.size.x),
+    y: formatNumber(modelStats.size.y),
+    z: formatNumber(modelStats.size.z),
+    triangles: modelStats.triangles.toLocaleString(locale()),
+    volume: formatNumber(modelStats.volume),
+  });
+  ui.info.textContent = solidReady ? text : `${text} ${t('model.notSolid')}`;
+}
+
+function modelRadius() {
+  const box = new THREE.Box3().setFromObject(diceMesh);
+  return {
+    center: box.getCenter(new THREE.Vector3()),
+    radius: Math.max(box.getSize(new THREE.Vector3()).length() * 0.9, 1),
+  };
+}
+
+function setClipping(radius) {
+  camera.near = Math.max(radius / 800, 1e-4);
+  camera.far = radius * 50;
+  camera.updateProjectionMatrix();
 }
 
 function fitCamera() {
   if (!diceMesh) return;
-  const box = new THREE.Box3().setFromObject(diceMesh);
-  const center = box.getCenter(new THREE.Vector3());
-  const radius = Math.max(box.getSize(new THREE.Vector3()).length() * 0.9, 1);
+  const { center, radius } = modelRadius();
   controls.target.copy(center);
   camera.position.copy(center).add(new THREE.Vector3(radius, -radius * 1.25, radius * 0.85));
-  camera.near = Math.max(radius / 800, 1e-4);
-  camera.far = radius * 50;
-  camera.updateProjectionMatrix();
+  setClipping(radius);
   controls.update();
+  touch();
 }
 
-function replaceGeometry(geometry, { keepSource = false } = {}) {
+function showGeometry(geometry, solid) {
   if (!diceMesh) {
     diceMesh = new THREE.Mesh(geometry, new THREE.MeshStandardMaterial({
       color: ui.color.value,
@@ -256,23 +404,32 @@ function replaceGeometry(geometry, { keepSource = false } = {}) {
     diceMesh.geometry.dispose();
     diceMesh.geometry = geometry;
   }
-  if (!keepSource) {
-    /* source stays the uploaded solid */
-  }
-  ui.info.textContent = formatSize(geometry);
-  solidReady = true;
+  solidReady = solid;
+  measure(geometry);
+  renderInfo();
   syncButtons();
 }
 
-function showMeshOnly(geometry, message) {
-  replaceGeometry(geometry);
+function removeModel() {
+  if (diceMesh) {
+    scene.remove(diceMesh);
+    diceMesh.geometry.dispose();
+    diceMesh.material.dispose();
+    diceMesh = null;
+  }
+  if (sourceGeometry) {
+    sourceGeometry.dispose();
+    sourceGeometry = null;
+  }
+  sourceSolid = false;
   solidReady = false;
-  ui.info.textContent = `${formatSize(geometry)} Этот STL нельзя резать: сетка не цельная.`;
-  setStatus(message);
-  syncButtons();
+  modelStats = null;
+  marks = [];
 }
 
 function clearStamps() {
+  for (const timer of rebuildTimers.values()) clearTimeout(timer);
+  rebuildTimers.clear();
   for (const mesh of previews.values()) {
     scene.remove(mesh);
     mesh.geometry.dispose();
@@ -284,34 +441,47 @@ function clearStamps() {
 }
 
 function clearHistory() {
-  for (const geometry of history) geometry.dispose();
+  for (const entry of history) entry.geometry.dispose();
   history = [];
 }
 
-async function adoptGeometry(raw, name, asSource, autoFlip = true) {
+function adoptGeometry(raw, name, asSource, autoFlip = true) {
   clearStamps();
-  if (asSource) clearHistory();
-  let prepared;
+  if (asSource) {
+    clearHistory();
+    marks = [];
+  }
+  let geometry;
+  let solid = true;
+  let flipped = false;
+  let failure = null;
   try {
-    prepared = prepareSolid(raw, { autoFlip });
+    const prepared = prepareSolid(raw, { autoFlip });
+    geometry = prepared.geometry;
+    flipped = prepared.flipped;
   } catch (error) {
-    const geometry = error.geometry || raw;
-    if (!sourceGeometry && asSource) sourceGeometry = geometry.clone();
-    sourceName = name;
-    showMeshOnly(geometry, error.message || 'Модель не цельная.');
-    fitCamera();
-    return;
+    geometry = error.geometry || raw;
+    solid = false;
+    failure = error;
   }
   if (asSource) {
     if (sourceGeometry) sourceGeometry.dispose();
-    sourceGeometry = prepared.geometry.clone();
+    sourceGeometry = geometry.clone();
+    sourceSolid = solid;
     sourceName = name;
   }
-  replaceGeometry(prepared.geometry);
-  fitCamera();
-  const note = prepared.flipped ? ' Нормали смотрели внутрь, развернул их.' : '';
-  setStatus(`Модель на сцене.${note} Кликните по грани, чтобы поставить знак.`);
-  setHint('Клик — новый штамп. Поставленный штамп тянется мышью по поверхности');
+  showGeometry(geometry, solid);
+  if (asSource) fitCamera();
+  if (failure) {
+    setStatus(errorMsg(failure, 'err.solid.open'));
+    setHint('hint.notSolid');
+  } else {
+    setStatus(flipped ? 'status.modelFlipped' : 'status.modelReady');
+    setHint('hint.ready');
+  }
+  saveModel();
+  if (asSource) saveSource();
+  touch();
 }
 
 async function loadArrayBuffer(buffer, name) {
@@ -320,9 +490,16 @@ async function loadArrayBuffer(buffer, name) {
   } catch {
     return;
   }
-  const geometry = loader.parse(buffer);
-  if (!geometry.getAttribute('position') || geometry.getAttribute('position').count < 3) {
-    setStatus('В файле нет треугольников.');
+  let geometry;
+  try {
+    geometry = loader.parse(buffer);
+  } catch {
+    setStatus('err.stlParse');
+    return;
+  }
+  const position = geometry.getAttribute('position');
+  if (!position || position.count < 3) {
+    setStatus('err.stlEmpty');
     return;
   }
   adoptGeometry(geometry, name.replace(/\.stl$/i, '') || 'dice', true);
@@ -346,8 +523,14 @@ function placementMatrix(stamp) {
   return matrix;
 }
 
-function matrixArray(matrix) {
-  return Array.from(matrix.elements);
+function stampJobs() {
+  return stamps.map((stamp) => ({
+    contours: stamp.contours,
+    fillRule: stamp.fillRule,
+    depth: stamp.depth,
+    mode: stamp.mode,
+    matrix: Array.from(placementMatrix(stamp).elements),
+  }));
 }
 
 function positionPreview(stamp) {
@@ -369,7 +552,7 @@ function rebuildPreview(stamp) {
   try {
     geometry = localToolGeometry(stamp.contours, stamp.fillRule, stamp.depth, stamp.mode);
   } catch (error) {
-    setStatus(error.message || 'Не удалось построить знак.');
+    setStatus(errorMsg(error, 'err.stampBuild'));
     return;
   }
   let mesh = previews.get(stamp.id);
@@ -407,11 +590,17 @@ function scheduleRebuild(stamp) {
   rebuildTimers.set(stamp.id, setTimeout(() => rebuildPreview(stamp), 40));
 }
 
+function stampName(stamp) {
+  const raw = stamp.kind === 'text' ? stamp.source : stamp.label || 'SVG';
+  return raw.replace(/\s+/g, ' ').trim().slice(0, 24) || '—';
+}
+
 function stampLabel(stamp) {
-  const raw = stamp.kind === 'text' ? stamp.source : 'SVG';
-  const text = raw.replace(/\s+/g, ' ').trim().slice(0, 24) || 'знак';
-  const how = stamp.mode === 'raise' ? 'поднять' : 'вдавить';
-  return `${text} · ${how} · ${stamp.height}`;
+  return t('stamps.item', {
+    what: stampName(stamp),
+    how: t(stamp.mode === 'raise' ? 'how.raiseShort' : 'how.cutShort'),
+    height: stamp.height,
+  });
 }
 
 function renderList() {
@@ -428,7 +617,8 @@ function renderList() {
     remove.type = 'button';
     remove.className = 'x';
     remove.textContent = '×';
-    remove.title = 'Удалить штамп';
+    remove.title = t('stamps.remove');
+    remove.setAttribute('aria-label', t('stamps.remove'));
     remove.addEventListener('click', () => removeStamp(stamp.id));
     item.append(pick, remove);
     ui.list.append(item);
@@ -437,7 +627,7 @@ function renderList() {
     const item = document.createElement('li');
     const note = document.createElement('span');
     note.className = 'muted';
-    note.textContent = 'Пока пусто.';
+    note.textContent = t('stamps.empty');
     item.append(note);
     ui.list.append(item);
   }
@@ -452,17 +642,22 @@ function deselect() {
   if (selectedId == null) return;
   selectedId = null;
   renderList();
-  setStatus('Выбор снят. Следующий клик по модели поставит новый штамп.');
+  setStatus('status.deselected');
+  touch();
 }
 
-function selectStamp(id) {
-  const stamp = stamps.find((item) => item.id === id);
-  if (!stamp) return;
-  selectedId = id;
+// Loads the stamp's sign and numbers into the form. The symbol tab stays open if the user is in it.
+function showStampInForm(stamp) {
   formLock = true;
-  setKind(stamp.kind);
-  if (stamp.kind === 'text') ui.text.value = stamp.source;
-  else ui.svg.value = stamp.source;
+  kind = stamp.kind;
+  if (stamp.kind === 'text') {
+    ui.text.value = stamp.source;
+    if (hasFont(stamp.fontId)) ui.font.value = stamp.fontId;
+  } else {
+    ui.svg.value = stamp.source;
+    svgLabel = stamp.label || '';
+  }
+  if (pane !== 'symbols') showPane(stamp.kind);
   mode = stamp.mode;
   ui.modeCut.classList.toggle('is-on', mode === 'cut');
   ui.modeRaise.classList.toggle('is-on', mode === 'raise');
@@ -472,12 +667,22 @@ function selectStamp(id) {
   ui.offU.value = String(stamp.offsetU);
   ui.offV.value = String(stamp.offsetV);
   formLock = false;
+}
+
+function selectStamp(id) {
+  const stamp = stamps.find((item) => item.id === id);
+  if (!stamp) return;
+  selectedId = id;
+  showStampInForm(stamp);
   renderList();
-  setStatus(`Выбран штамп «${stampLabel(stamp)}». Правьте знак в поле, тяните штамп мышью по модели.`);
+  setStatus('status.selected', { label: stampLabel(stamp) });
+  touch();
 }
 
 function removeStamp(id) {
   stamps = stamps.filter((stamp) => stamp.id !== id);
+  clearTimeout(rebuildTimers.get(id));
+  rebuildTimers.delete(id);
   const mesh = previews.get(id);
   if (mesh) {
     scene.remove(mesh);
@@ -486,50 +691,59 @@ function removeStamp(id) {
   }
   if (selectedId === id) selectedId = null;
   renderList();
+  touch();
 }
 
-function readArtwork() {
+async function readArtwork() {
   if (kind === 'svg') {
     let svg = ui.svg.value.trim();
-    if (!svg) throw new Error('Вставьте SVG или откройте файл.');
+    if (!svg) throw new AppError('err.svgEmpty');
     if (!/<svg[\s>]/i.test(svg)) {
-      if (/<(path|circle|polygon|rect|ellipse)\b/i.test(svg)) {
-        svg = `<svg xmlns="http://www.w3.org/2000/svg">${svg}</svg>`;
-      } else {
-        throw new Error('Это не похоже на SVG.');
-      }
+      if (!/<(path|circle|polygon|rect|ellipse)\b/i.test(svg)) throw new AppError('err.notSvg');
+      svg = `<svg xmlns="http://www.w3.org/2000/svg">${svg}</svg>`;
     }
-    const artwork = artworkFromSvg(svg);
-    return { kind: 'svg', source: svg, ...artwork };
+    return { kind: 'svg', source: svg, label: svgLabel, fontId: '', ...artworkFromSvg(svg) };
   }
   const text = ui.text.value.replace(/\r/g, '');
-  if (!text.trim()) throw new Error('Введите текст или символ.');
-  if (!font) throw new Error('Шрифт ещё не загрузился.');
-  const artwork = artworkFromText(font, text, num(ui.height) || 6);
-  return { kind: 'text', source: text, ...artwork };
+  if (!text.trim()) throw new AppError('err.textEmpty');
+  if (!fontReady) throw new AppError('err.fontNotReady');
+  const fontId = hasFont(ui.font.value) ? ui.font.value : DEFAULT_FONT;
+  if (needsEmoji(fontId, text)) {
+    try {
+      await ensureEmoji();
+    } catch {
+      // Without the emoji font the characters are simply reported as missing below.
+    }
+  }
+  return { kind: 'text', source: text, label: '', fontId, ...layoutText(fontId, text, 10) };
 }
 
-function placeStamp(hit) {
-  let artwork;
-  try {
-    artwork = readArtwork();
-  } catch (error) {
-    setStatus(error.message);
-    return;
-  }
+function missingMessage(artwork) {
+  return artwork.missing && artwork.missing.length
+    ? msg('status.missing', { chars: artwork.missing.join(' ') })
+    : null;
+}
+
+async function placeStamp(hit) {
+  const point = hit.point.clone();
+  const normal = hit.face.normal.clone().transformDirection(diceMesh.matrixWorld).normalize();
   const height = Math.max(0.05, num(ui.height));
+  let artwork;
   let shape;
   try {
+    artwork = await readArtwork();
     shape = shapeFor(artwork.contours, height);
   } catch (error) {
-    setStatus(error.message);
+    setStatus(errorMsg(error));
     return;
   }
-  const normal = hit.face.normal.clone().transformDirection(diceMesh.matrixWorld).normalize();
+  if (!diceMesh) return;
   const stamp = {
     id: stampSeq++,
     kind: artwork.kind,
     source: artwork.source,
+    label: artwork.label,
+    fontId: artwork.fontId,
     sourceContours: artwork.contours,
     ...shape,
     fillRule: artwork.fillRule,
@@ -539,7 +753,7 @@ function placeStamp(hit) {
     rotation: 0,
     offsetU: 0,
     offsetV: 0,
-    point: hit.point.clone(),
+    point,
     normal,
   };
   stamps.push(stamp);
@@ -551,11 +765,8 @@ function placeStamp(hit) {
   selectedId = stamp.id;
   rebuildPreview(stamp);
   renderList();
-  if (artwork.missing && artwork.missing.length) {
-    setStatus(`В шрифте нет: ${artwork.missing.join(' ')}. Такой знак лучше принести SVG.`);
-  } else {
-    setStatus('Штамп стоит на грани. Его можно тянуть мышью, править знак в поле или нанести на модель.');
-  }
+  setStatus(missingMessage(artwork) || msg('status.placed'));
+  touch();
 }
 
 // Sits the stamp on the surface under the hit and tilts it to that face.
@@ -569,12 +780,15 @@ function moveSelected(hit) {
   const stamp = selectedStamp();
   if (!stamp) return;
   seatStamp(stamp, hit);
-  setStatus('Штамп перенесён.');
+  setStatus('status.moved');
+  touch();
 }
 
 let sourceTimer = 0;
 
 function scheduleSourceEdit() {
+  touch();
+  syncButtons();
   if (formLock || selectedId == null) return;
   const id = selectedId;
   clearTimeout(sourceTimer);
@@ -584,46 +798,56 @@ function scheduleSourceEdit() {
 }
 
 // Rebuilds the selected stamp from whatever is in the active sign field.
-function applySourceEdit() {
+async function applySourceEdit() {
   const stamp = selectedStamp();
   if (!stamp) return false;
   let artwork;
   let shape;
   try {
-    artwork = readArtwork();
+    artwork = await readArtwork();
     shape = shapeFor(artwork.contours, stamp.height);
   } catch (error) {
-    setStatus(`${error.message} Штамп пока прежний.`);
+    setStatus('status.editKept', { reason: errorMsg(error) });
     return false;
   }
+  if (!stamps.includes(stamp)) return false;
   Object.assign(stamp, shape, {
     kind: artwork.kind,
     source: artwork.source,
+    label: artwork.label,
+    fontId: artwork.fontId,
     sourceContours: artwork.contours,
     fillRule: artwork.fillRule,
   });
   rebuildPreview(stamp);
   renderList();
-  if (artwork.missing && artwork.missing.length) {
-    setStatus(`В шрифте нет: ${artwork.missing.join(' ')}. Такой знак лучше принести SVG.`);
-  } else {
-    setStatus('Знак выбранного штампа обновлён.');
-  }
+  setStatus(missingMessage(artwork) || msg('status.signUpdated'));
+  touch();
   return true;
+}
+
+// A sign was picked from a file, a preset or the symbol library.
+async function signChosen(label) {
+  touch();
+  syncButtons();
+  if (selectedStamp()) {
+    if (await applySourceEdit()) setStatus('status.signOnStamp', { label });
+  } else {
+    setStatus('status.signReady', { label });
+  }
 }
 
 function useSvg(text, label) {
   ui.svg.value = text;
-  setKind('svg');
-  if (selectedStamp()) {
-    if (applySourceEdit()) setStatus(`${label} теперь на выбранном штампе.`);
-  } else {
-    setStatus(`${label} в поле. Кликните по грани.`);
-  }
+  svgLabel = label;
+  kind = 'svg';
+  if (pane !== 'symbols') showPane('svg');
+  signChosen(label);
 }
 
 function onGeomInput() {
   if (formLock) return;
+  touch();
   const stamp = selectedStamp();
   if (!stamp) return;
   const nextHeight = Math.max(0.05, num(ui.height));
@@ -639,7 +863,7 @@ function onGeomInput() {
     try {
       Object.assign(stamp, shapeFor(stamp.sourceContours, stamp.height));
     } catch (error) {
-      setStatus(error.message);
+      setStatus(errorMsg(error));
       return;
     }
     scheduleRebuild(stamp);
@@ -698,28 +922,31 @@ function dragTo(stamp, clientX, clientY) {
   return true;
 }
 
+function markOf(stamp) {
+  return { label: stampName(stamp), normal: stamp.normal.toArray() };
+}
+
+// Cuts or adds every placed stamp. Resolves to false when the boolean failed.
 async function bake() {
-  if (!diceMesh || !stamps.length || busy || !solidReady) return;
-  setBusy(true, `Наношу ${stamps.length}…`);
-  await new Promise((resolve) => setTimeout(resolve, 30));
+  if (!diceMesh || !stamps.length || busy || !solidReady) return false;
+  setBusy(true, 'busy.baking', { n: stamps.length });
+  await nextPaint();
   try {
-    const jobs = stamps.map((stamp) => ({
-      contours: stamp.contours,
-      fillRule: stamp.fillRule,
-      depth: stamp.depth,
-      mode: stamp.mode,
-      matrix: matrixArray(placementMatrix(stamp)),
-    }));
-    const next = applyStamps(diceMesh.geometry, jobs);
-    history.push(diceMesh.geometry.clone());
-    if (history.length > 8) history.shift().dispose();
-    diceMesh.geometry.dispose();
+    const next = applyStamps(diceMesh.geometry, stampJobs());
+    history.push({ geometry: diceMesh.geometry, marks: marks.length });
+    if (history.length > HISTORY_LIMIT) history.shift().geometry.dispose();
+    marks = marks.concat(stamps.map(markOf));
     diceMesh.geometry = next;
     clearStamps();
-    ui.info.textContent = formatSize(next);
-    setStatus('Знаки в теле модели. Можно скачать STL или поставить ещё.');
+    measure(next);
+    renderInfo();
+    setStatus('status.baked');
+    saveModel();
+    touch();
+    return true;
   } catch (error) {
-    setStatus(error.message || 'Булева операция не прошла.');
+    setStatus(errorMsg(error, 'err.boolean'));
+    return false;
   } finally {
     setBusy(false);
   }
@@ -730,46 +957,139 @@ function undo() {
   if (!previous || !diceMesh) return;
   clearStamps();
   diceMesh.geometry.dispose();
-  diceMesh.geometry = previous;
-  ui.info.textContent = formatSize(previous);
+  diceMesh.geometry = previous.geometry;
+  marks = marks.slice(0, previous.marks);
   solidReady = true;
-  setStatus('Вернул модель до последнего нанесения.');
+  measure(previous.geometry);
+  renderInfo();
+  setStatus('status.undone');
   syncButtons();
+  saveModel();
+  touch();
 }
 
 function resetSource() {
-  if (!sourceGeometry) return;
+  if (!sourceGeometry || !diceMesh) return;
   clearStamps();
   clearHistory();
-  diceMesh.geometry.dispose();
-  diceMesh.geometry = sourceGeometry.clone();
-  solidReady = true;
-  ui.info.textContent = formatSize(diceMesh.geometry);
-  setStatus('Снова исходный STL.');
-  syncButtons();
+  marks = [];
+  showGeometry(sourceGeometry.clone(), sourceSolid);
+  setStatus('status.reset');
+  saveModel();
+  touch();
 }
 
-function download() {
-  if (!diceMesh) return;
-  const data = exporter.parse(diceMesh, { binary: true });
-  const bytes = new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
-  const blob = new Blob([bytes], { type: 'model/stl' });
+function safeFileName(name) {
+  return name.replace(/[\\/:*?"<>|]+/g, '_').trim() || 'dice';
+}
+
+function downloadBlob(name, blob) {
   const link = document.createElement('a');
   link.href = URL.createObjectURL(blob);
-  link.download = `${sourceName}-stamped.stl`;
+  link.download = name;
+  document.body.append(link);
   link.click();
-  URL.revokeObjectURL(link.href);
+  link.remove();
+  // Revoking at once can cancel the download in some browsers.
+  setTimeout(() => URL.revokeObjectURL(link.href), 10000);
 }
 
-function setKind(next) {
-  kind = next;
-  const text = next === 'text';
-  ui.tabText.classList.toggle('is-on', text);
-  ui.tabSvg.classList.toggle('is-on', !text);
-  ui.tabText.setAttribute('aria-selected', String(text));
-  ui.tabSvg.setAttribute('aria-selected', String(!text));
-  ui.paneText.hidden = !text;
-  ui.paneSvg.hidden = text;
+// Asks for write access while the click is still fresh: the browser refuses after a long calculation.
+async function exportDirReady() {
+  if (!exportDir) return false;
+  try {
+    const options = { mode: 'readwrite' };
+    let state = await exportDir.queryPermission(options);
+    if (state !== 'granted') state = await exportDir.requestPermission(options);
+    return state === 'granted';
+  } catch {
+    return false;
+  }
+}
+
+// Writes into the chosen folder, or hands the file to the browser's downloads when that is not possible.
+async function saveFile(name, blob, toDir) {
+  if (toDir && exportDir) {
+    try {
+      const handle = await exportDir.getFileHandle(name, { create: true });
+      const writer = await handle.createWritable();
+      await writer.write(blob);
+      await writer.close();
+      return msg('where.folder', { name: exportDir.name });
+    } catch {
+      downloadBlob(name, blob);
+      return msg('where.folderFailed', { name: exportDir.name });
+    }
+  }
+  downloadBlob(name, blob);
+  return msg(exportDir ? 'where.folderDenied' : 'where.downloads', exportDir ? { name: exportDir.name } : undefined);
+}
+
+// Welds the mesh, checks it is one closed body and turns the normals outward.
+function tidyModel() {
+  let prepared;
+  try {
+    prepared = prepareSolid(diceMesh.geometry, { autoFlip: true });
+  } catch {
+    return msg('export.tidyBroken');
+  }
+  const before = diceMesh.geometry.getAttribute('position').count;
+  const after = prepared.geometry.getAttribute('position').count;
+  if (!prepared.flipped && before === after) {
+    prepared.geometry.dispose();
+    return msg('export.tidyOk');
+  }
+  showGeometry(prepared.geometry, true);
+  saveModel();
+  return msg(prepared.flipped ? 'export.tidyFlipped' : 'export.tidyWelded');
+}
+
+async function exportStl() {
+  if (!diceMesh || busy) return;
+  const toDir = await exportDirReady();
+  const pending = stamps.length;
+  let note;
+  if (!ui.auto.checked) {
+    note = pending ? msg('export.pendingLeft', { n: pending }) : msg('export.asIs');
+  } else if (!solidReady || !engineReady) {
+    note = msg(pending ? 'export.brokenPending' : 'export.tidyBroken');
+  } else {
+    if (pending && !(await bake())) return;
+    setBusy(true, 'busy.checking');
+    await nextPaint();
+    try {
+      note = tidyModel();
+    } finally {
+      setBusy(false);
+    }
+    if (pending) note = msg('export.baked', { n: pending, note });
+  }
+  const data = exporter.parse(diceMesh, { binary: true });
+  const bytes = new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+  const name = `${safeFileName(sourceName)}-stamped.stl`;
+  const where = await saveFile(name, new Blob([bytes], { type: 'model/stl' }), toDir);
+  setStatus('status.exported', { file: name, where, note });
+}
+
+function showPane(next) {
+  pane = next;
+  const tabs = [[ui.tabText, ui.paneText, 'text'], [ui.tabSvg, ui.paneSvg, 'svg'], [ui.tabSymbols, ui.paneSymbols, 'symbols']];
+  for (const [tab, box, name] of tabs) {
+    tab.classList.toggle('is-on', name === next);
+    tab.setAttribute('aria-selected', String(name === next));
+    box.hidden = name !== next;
+  }
+}
+
+function setPane(next) {
+  showPane(next);
+  if (next === 'symbols') {
+    if (symbols.phase === 'idle') loadSymbols();
+  } else {
+    kind = next;
+  }
+  syncButtons();
+  touch();
 }
 
 function setMode(next) {
@@ -777,6 +1097,555 @@ function setMode(next) {
   ui.modeCut.classList.toggle('is-on', next === 'cut');
   ui.modeRaise.classList.toggle('is-on', next === 'raise');
   onGeomInput();
+  touch();
+}
+
+// ---- Fonts ----
+
+function refreshFontList(selectId) {
+  const wanted = selectId || ui.font.value || DEFAULT_FONT;
+  ui.font.replaceChildren();
+  for (const entry of listFonts()) {
+    const option = document.createElement('option');
+    option.value = entry.id;
+    option.textContent = entry.name;
+    ui.font.append(option);
+  }
+  ui.font.value = hasFont(wanted) ? wanted : DEFAULT_FONT;
+  syncButtons();
+}
+
+async function fontAdded(entry) {
+  refreshFontList(entry.id);
+  saveFonts();
+  touch();
+  if (kind === 'text' && selectedStamp()) await applySourceEdit();
+  setStatus('status.fontAdded', { name: entry.name });
+}
+
+async function addFontFile(file) {
+  try {
+    await fontAdded(await addFontFromFile(file));
+  } catch (error) {
+    setStatus(errorMsg(error, 'err.fontParse'));
+  }
+}
+
+async function addFontLink() {
+  const value = ui.fontUrl.value;
+  ui.fontLoad.disabled = true;
+  setStatus('status.fontLoading');
+  try {
+    await fontAdded(await addFontFromUrl(value));
+    ui.fontUrl.value = '';
+  } catch (error) {
+    setStatus(errorMsg(error, 'err.fontFetch'));
+  } finally {
+    ui.fontLoad.disabled = false;
+  }
+}
+
+function dropFont() {
+  const id = ui.font.value;
+  const name = fontName(id);
+  if (!removeFont(id)) return;
+  refreshFontList(DEFAULT_FONT);
+  saveFonts();
+  touch();
+  setStatus('status.fontRemoved', { name });
+}
+
+// ---- Symbol libraries ----
+
+// phase: 'idle' | 'loading' | 'ready' | 'failed'
+const symbols = { phase: 'idle', items: [], error: null, token: 0, shown: 0, total: 0 };
+
+async function loadSymbols() {
+  const lib = library(ui.symLib.value);
+  const token = ++symbols.token;
+  symbols.phase = 'loading';
+  symbols.items = [];
+  renderSymbols();
+  try {
+    const items = await loadLibrary(lib.id, getLang());
+    if (token !== symbols.token) return;
+    symbols.items = items;
+    symbols.phase = 'ready';
+  } catch (error) {
+    if (token !== symbols.token) return;
+    symbols.error = errorMsg(error, 'err.libFetch');
+    symbols.phase = 'failed';
+  }
+  renderSymbols();
+}
+
+function symbolButton(lib, item, ink) {
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'sym';
+  button.title = item.label;
+  button.setAttribute('role', 'option');
+  button.setAttribute('aria-label', item.label);
+  if (lib.type === 'emoji') {
+    button.textContent = item.char;
+    button.style.fontFamily = `${EMOJI_CSS_FAMILY}, sans-serif`;
+  } else {
+    const image = document.createElement('img');
+    image.alt = '';
+    image.loading = 'lazy';
+    image.src = `data:image/svg+xml;utf8,${encodeURIComponent(item.svg.replace(/currentColor/g, ink))}`;
+    button.append(image);
+  }
+  button.addEventListener('click', () => pickSymbol(lib, item));
+  return button;
+}
+
+function renderSymbols() {
+  const lib = library(ui.symLib.value);
+  ui.symCredit.replaceChildren();
+  const link = document.createElement('a');
+  link.href = lib.link;
+  link.target = '_blank';
+  link.rel = 'noopener noreferrer';
+  link.textContent = lib.name;
+  ui.symCredit.append(link, ` · ${lib.license}`);
+
+  if (symbols.phase !== 'ready') {
+    ui.symGrid.replaceChildren();
+    if (symbols.phase === 'loading') ui.symInfo.textContent = t('sym.loading', { name: lib.name });
+    else if (symbols.phase === 'failed') ui.symInfo.textContent = render(symbols.error);
+    else ui.symInfo.textContent = '';
+    return;
+  }
+  const limit = lib.type === 'emoji' ? EMOJI_LIMIT : ICON_LIMIT;
+  const found = searchItems(symbols.items, ui.symQuery.value, limit);
+  const ink = cssVar('--text', '#f3eee6');
+  ui.symGrid.replaceChildren(...found.items.map((item) => symbolButton(lib, item, ink)));
+  const count = found.total
+    ? t('sym.shown', { shown: found.items.length, total: found.total.toLocaleString(locale()) })
+    : t('sym.nothing');
+  ui.symInfo.textContent = lib.type === 'icons' ? `${count} ${t('sym.english')}` : count;
+}
+
+function pickSymbol(lib, item) {
+  if (lib.type === 'emoji') {
+    ui.text.value = item.char;
+    kind = 'text';
+    signChosen(`${item.char} ${item.label}`);
+    return;
+  }
+  ui.svg.value = item.svg;
+  svgLabel = item.label;
+  kind = 'svg';
+  signChosen(`${item.label} (${lib.name})`);
+}
+
+let symbolTimer = 0;
+
+function scheduleSymbolSearch() {
+  clearTimeout(symbolTimer);
+  symbolTimer = setTimeout(renderSymbols, 140);
+  touch();
+}
+
+// ---- Cache and project files ----
+
+// Nothing is written before the saved scene has been read back, or a reload would wipe it.
+let cacheOpen = false;
+let cacheWarned = false;
+let saveTimer = 0;
+
+function store(name, value) {
+  return cacheSet(name, value).catch(() => {
+    if (cacheWarned) return;
+    cacheWarned = true;
+    setStatus('status.cacheFailed');
+  });
+}
+
+function formData() {
+  return {
+    kind,
+    pane,
+    text: ui.text.value,
+    svg: ui.svg.value,
+    svgLabel,
+    fontId: ui.font.value,
+    mode,
+    height: num(ui.height),
+    depth: num(ui.depth),
+    color: ui.color.value,
+    smooth: ui.smooth.checked,
+    auto: ui.auto.checked,
+    symLib: ui.symLib.value,
+    symQuery: ui.symQuery.value,
+  };
+}
+
+function sessionData() {
+  return {
+    name: sourceName,
+    solid: solidReady,
+    sourceSolid,
+    selectedId,
+    stamps: stamps.map(stampToData),
+    marks: marks.map((mark) => ({ label: mark.label, normal: mark.normal.slice() })),
+    form: formData(),
+    view: { position: camera.position.toArray(), target: controls.target.toArray() },
+  };
+}
+
+function saveSession() {
+  clearTimeout(saveTimer);
+  saveTimer = 0;
+  if (cacheOpen) store('session', sessionData());
+}
+
+function touch() {
+  if (!cacheOpen) return;
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(saveSession, 250);
+}
+
+function saveModel() {
+  if (!cacheOpen) return;
+  if (diceMesh) store('model', packGeometry(diceMesh.geometry));
+  else cacheDel('model').catch(() => {});
+}
+
+function saveSource() {
+  if (!cacheOpen) return;
+  if (sourceGeometry) store('source', packGeometry(sourceGeometry));
+  else cacheDel('source').catch(() => {});
+}
+
+function saveFonts() {
+  if (cacheOpen) store('fonts', customFonts());
+}
+
+function applyForm(form) {
+  if (!form || typeof form !== 'object') return;
+  formLock = true;
+  if (typeof form.text === 'string') ui.text.value = form.text;
+  if (typeof form.svg === 'string') ui.svg.value = form.svg;
+  svgLabel = typeof form.svgLabel === 'string' ? form.svgLabel : '';
+  if (hasFont(form.fontId)) ui.font.value = form.fontId;
+  mode = form.mode === 'raise' ? 'raise' : 'cut';
+  ui.modeCut.classList.toggle('is-on', mode === 'cut');
+  ui.modeRaise.classList.toggle('is-on', mode === 'raise');
+  if (Number.isFinite(form.height) && form.height > 0) setPair(ui.height, ui.heightNum, form.height);
+  if (Number.isFinite(form.depth) && form.depth > 0) setPair(ui.depth, ui.depthNum, form.depth);
+  if (typeof form.color === 'string' && /^#[0-9a-f]{6}$/i.test(form.color)) ui.color.value = form.color;
+  ui.smooth.checked = Boolean(form.smooth);
+  if (typeof form.auto === 'boolean') ui.auto.checked = form.auto;
+  if (LIBRARIES.some((lib) => lib.id === form.symLib)) ui.symLib.value = form.symLib;
+  if (typeof form.symQuery === 'string') ui.symQuery.value = form.symQuery;
+  kind = form.kind === 'svg' ? 'svg' : 'text';
+  formLock = false;
+  const nextPane = ['text', 'svg', 'symbols'].includes(form.pane) ? form.pane : kind;
+  showPane(nextPane);
+  symbols.phase = 'idle';
+  symbols.items = [];
+  if (nextPane === 'symbols') loadSymbols();
+  else renderSymbols();
+}
+
+function readMarks(list) {
+  if (!Array.isArray(list)) return [];
+  const out = [];
+  for (const mark of list) {
+    const n = mark && mark.normal;
+    if (!Array.isArray(n) || n.length !== 3 || !n.every((value) => Number.isFinite(value))) continue;
+    out.push({ label: String(mark.label ?? ''), normal: n.slice() });
+  }
+  return out;
+}
+
+function vectorFrom(list) {
+  return Array.isArray(list) && list.length === 3 && list.every((value) => Number.isFinite(value))
+    ? new THREE.Vector3().fromArray(list)
+    : null;
+}
+
+// Rebuilds the whole scene from saved data. Returns how many stamps could not be read.
+function applyScene(session, geometry, source) {
+  clearStamps();
+  clearHistory();
+  removeModel();
+  applyForm(session.form);
+  let skipped = 0;
+  if (geometry) {
+    sourceName = String(session.name || 'dice');
+    sourceGeometry = source || geometry.clone();
+    sourceSolid = source ? session.sourceSolid !== false : session.solid !== false;
+    showGeometry(geometry, session.solid !== false);
+    diceMesh.material.color.set(ui.color.value);
+    diceMesh.material.flatShading = !ui.smooth.checked;
+    diceMesh.material.needsUpdate = true;
+    marks = readMarks(session.marks);
+
+    const used = new Set();
+    for (const data of Array.isArray(session.stamps) ? session.stamps : []) {
+      try {
+        const stamp = stampFromData(data);
+        Object.assign(stamp, shapeFor(stamp.sourceContours, stamp.height));
+        while (used.has(stamp.id)) stamp.id += 1;
+        used.add(stamp.id);
+        stamps.push(stamp);
+        rebuildPreview(stamp);
+      } catch {
+        skipped += 1;
+      }
+    }
+    stampSeq = stamps.reduce((max, stamp) => Math.max(max, stamp.id), 0) + 1;
+
+    const position = vectorFrom(session.view && session.view.position);
+    const target = vectorFrom(session.view && session.view.target);
+    if (position && target && position.distanceToSquared(target) > 1e-12) {
+      camera.position.copy(position);
+      controls.target.copy(target);
+      setClipping(modelRadius().radius);
+      controls.update();
+    } else {
+      fitCamera();
+    }
+    setHint(session.solid !== false ? 'hint.ready' : 'hint.notSolid');
+  } else {
+    setHint('hint.start');
+  }
+  const chosen = stamps.find((stamp) => stamp.id === session.selectedId);
+  if (chosen) {
+    selectedId = chosen.id;
+    showStampInForm(chosen);
+  }
+  renderList();
+  renderInfo();
+  return skipped;
+}
+
+async function restoreCache() {
+  if (!engineReady) return;
+  let saved;
+  try {
+    saved = await Promise.all(['session', 'model', 'source', 'fonts', 'dir'].map((name) => cacheGet(name)));
+  } catch {
+    // No IndexedDB (private window, blocked storage): the app works, it just forgets on reload.
+    cacheOpen = true;
+    return;
+  }
+  const [session, model, source, savedFonts, dir] = saved;
+  for (const entry of Array.isArray(savedFonts) ? savedFonts : []) {
+    try {
+      addFont(entry);
+    } catch {
+      // A font that no longer parses is dropped; stamps keep their own outlines.
+    }
+  }
+  refreshFontList();
+  if (dir && canPickDir) exportDir = dir;
+  renderDir();
+  // A model opened while the cache was being read wins over the saved scene.
+  if (session && typeof session === 'object' && !diceMesh) {
+    try {
+      const geometry = model ? unpackGeometry(model) : null;
+      const original = geometry && source ? unpackGeometry(source) : null;
+      applyScene(session, geometry, original);
+      if (geometry) setStatus('status.restored', { name: sourceName, n: stamps.length });
+    } catch {
+      setStatus('status.cacheBroken');
+    }
+  }
+  cacheOpen = true;
+}
+
+function sameArray(a, b) {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+  return true;
+}
+
+async function saveProject() {
+  if (!diceMesh || busy) return;
+  const toDir = await exportDirReady();
+  const model = packGeometry(diceMesh.geometry);
+  const source = sourceGeometry ? packGeometry(sourceGeometry) : null;
+  const sourceIsModel = !source || (sameArray(source.positions, model.positions) && sameArray(source.index, model.index));
+  const project = {
+    app: PROJECT_APP,
+    version: PROJECT_VERSION,
+    savedAt: new Date().toISOString(),
+    session: sessionData(),
+    model: encodeGeometry(model),
+    source: sourceIsModel ? null : encodeGeometry(source),
+    fonts: customFonts().map((entry) => ({
+      id: entry.id,
+      name: entry.name,
+      origin: entry.origin,
+      url: entry.url,
+      files: entry.buffers.map(toBase64),
+    })),
+  };
+  const name = `${safeFileName(sourceName)}${PROJECT_EXT}`;
+  const where = await saveFile(name, new Blob([JSON.stringify(project)], { type: 'application/json' }), toDir);
+  setStatus('status.projectSaved', { file: name, where, n: stamps.length, fonts: project.fonts.length });
+}
+
+async function openProject(text) {
+  try {
+    await enginePromise;
+  } catch {
+    return;
+  }
+  let skipped = 0;
+  let badFonts = 0;
+  try {
+    let project;
+    try {
+      project = JSON.parse(text);
+    } catch {
+      throw new AppError('err.projectParse');
+    }
+    if (!project || project.app !== PROJECT_APP || !project.session || typeof project.session !== 'object') {
+      throw new AppError('err.projectForeign');
+    }
+    if (Number(project.version) > PROJECT_VERSION) throw new AppError('err.projectNewer');
+    // Everything is decoded before the current scene is touched, so a bad file changes nothing.
+    const geometry = project.model ? unpackGeometry(decodeGeometry(project.model)) : null;
+    const source = geometry && project.source ? unpackGeometry(decodeGeometry(project.source)) : null;
+    for (const entry of Array.isArray(project.fonts) ? project.fonts : []) {
+      try {
+        addFont({
+          id: entry.id,
+          name: entry.name,
+          origin: entry.origin,
+          url: typeof entry.url === 'string' ? entry.url : '',
+          buffers: entry.files.map(fromBase64),
+        });
+      } catch {
+        badFonts += 1;
+      }
+    }
+    refreshFontList();
+    skipped = applyScene(project.session, geometry, source);
+  } catch (error) {
+    setStatus(errorMsg(error, 'err.projectBroken'));
+    return;
+  }
+  saveModel();
+  saveSource();
+  saveFonts();
+  saveSession();
+  if (skipped || badFonts) setStatus('status.projectPartly', { name: sourceName, stamps: skipped, fonts: badFonts });
+  else setStatus('status.projectOpened', { name: sourceName, n: stamps.length });
+}
+
+function newProject() {
+  if (!diceMesh || busy) return;
+  if (!window.confirm(t('project.newConfirm'))) return;
+  clearStamps();
+  clearHistory();
+  removeModel();
+  sourceName = 'dice';
+  renderInfo();
+  syncButtons();
+  setHint('hint.start');
+  setStatus('status.cleared');
+  saveModel();
+  saveSource();
+  saveSession();
+}
+
+// ---- Export folder ----
+
+function renderDir() {
+  ui.dir.disabled = !canPickDir;
+  ui.dirClear.hidden = !exportDir;
+  if (!canPickDir) ui.dirName.textContent = t('export.dirUnsupported');
+  else if (exportDir) ui.dirName.textContent = t('export.dirNow', { name: exportDir.name });
+  else ui.dirName.textContent = t('export.dirNone');
+}
+
+async function pickDir() {
+  if (!canPickDir) return;
+  let handle;
+  try {
+    handle = await window.showDirectoryPicker({ id: 'dice-stamp-export', mode: 'readwrite' });
+  } catch (error) {
+    // AbortError is the user closing the dialog.
+    if (!error || error.name !== 'AbortError') setStatus('status.dirFailed');
+    return;
+  }
+  exportDir = handle;
+  renderDir();
+  setStatus('status.dirSet', { name: handle.name });
+  if (cacheOpen) store('dir', handle);
+}
+
+function clearDir() {
+  exportDir = null;
+  renderDir();
+  setStatus('status.dirCleared');
+  cacheDel('dir').catch(() => {});
+}
+
+// ---- Language and theme ----
+
+function applyTheme(name) {
+  const theme = THEMES.includes(name) ? name : 'midnight';
+  document.documentElement.dataset.theme = theme;
+  ui.theme.value = theme;
+  try {
+    localStorage.setItem(THEME_KEY, theme);
+  } catch {
+    // Private mode: the theme lasts for this visit.
+  }
+  scene.background = new THREE.Color(cssVar('--scene', '#2a241c'));
+  roller.refresh();
+  if (symbols.phase === 'ready') renderSymbols();
+}
+
+function renderPresets() {
+  ui.presets.replaceChildren();
+  for (const preset of PRESETS) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.textContent = t(preset.key);
+    button.addEventListener('click', () => useSvg(preset.svg, t(preset.key)));
+    ui.presets.append(button);
+  }
+}
+
+function redrawTexts() {
+  ui.status.textContent = render(live.status);
+  ui.hint.textContent = render(live.hint);
+  ui.engine.textContent = render(live.engine);
+  ui.busy.querySelector('span').textContent = render(live.busy);
+  renderPresets();
+  renderInfo();
+  renderList();
+  renderDir();
+  roller.refresh();
+}
+
+function openRoll() {
+  if (!diceMesh || busy) return;
+  let geometry = diceMesh.geometry;
+  let temporary = null;
+  if (stamps.length && solidReady && engineReady) {
+    try {
+      temporary = applyStamps(diceMesh.geometry, stampJobs());
+      geometry = temporary;
+    } catch {
+      // The tray then shows the die without the signs that are not applied yet.
+    }
+  }
+  roller.open({
+    geometry,
+    color: ui.color.value,
+    flat: !ui.smooth.checked,
+    marks: marks.concat(stamps.map(markOf)),
+  });
+  if (temporary) temporary.dispose();
 }
 
 function resize() {
@@ -794,16 +1663,46 @@ function animate() {
   renderer.render(scene, camera);
 }
 
-ui.fileStl.addEventListener('change', () => {
-  const file = ui.fileStl.files && ui.fileStl.files[0];
-  if (!file) return;
-  file.arrayBuffer().then((buffer) => loadArrayBuffer(buffer, file.name));
-});
+// ---- Wiring ----
+
+function firstFile(input) {
+  const file = input.files && input.files[0];
+  // Clearing the value lets the same file be picked again.
+  input.value = '';
+  return file || null;
+}
+
+function openFile(file) {
+  const name = file.name.toLowerCase();
+  if (name.endsWith('.stl')) {
+    file.arrayBuffer().then((buffer) => loadArrayBuffer(buffer, file.name));
+  } else if (name.endsWith('.svg')) {
+    file.text().then((text) => useSvg(text, file.name.replace(/\.svg$/i, '')));
+  } else if (name.endsWith('.json')) {
+    file.text().then(openProject);
+  } else if (/\.(ttf|otf|woff|woff2)$/.test(name)) {
+    addFontFile(file);
+  } else {
+    setStatus('err.fileKind');
+  }
+}
+
+for (const input of [ui.fileStl, ui.fileSvg, ui.fileProject, ui.fileFont]) {
+  input.addEventListener('change', () => {
+    const file = firstFile(input);
+    if (file) openFile(file);
+  });
+}
 
 ui.sample.addEventListener('click', async () => {
-  const response = await fetch('./samples/cube.stl');
-  if (!response.ok) {
-    setStatus('Не нашёл samples/cube.stl рядом со страницей.');
+  let response;
+  try {
+    response = await fetch('./samples/cube.stl');
+  } catch {
+    response = null;
+  }
+  if (!response || !response.ok) {
+    setStatus('err.sampleMissing');
     return;
   }
   loadArrayBuffer(await response.arrayBuffer(), 'cube.stl');
@@ -811,51 +1710,66 @@ ui.sample.addEventListener('click', async () => {
 
 ui.color.addEventListener('input', () => {
   if (diceMesh) diceMesh.material.color.set(ui.color.value);
+  touch();
 });
 
 ui.smooth.addEventListener('change', () => {
+  touch();
   if (!diceMesh) return;
   diceMesh.material.flatShading = !ui.smooth.checked;
   diceMesh.material.needsUpdate = true;
 });
 
-ui.flip.addEventListener('click', async () => {
-  if (!diceMesh) return;
-  await adoptGeometry(flipWinding(diceMesh.geometry), sourceName, false, false);
+ui.flip.addEventListener('click', () => {
+  if (diceMesh) adoptGeometry(flipWinding(diceMesh.geometry), sourceName, false, false);
 });
 
 ui.fit.addEventListener('click', fitCamera);
-ui.tabText.addEventListener('click', () => setKind('text'));
-ui.tabSvg.addEventListener('click', () => setKind('svg'));
+ui.tabText.addEventListener('click', () => setPane('text'));
+ui.tabSvg.addEventListener('click', () => setPane('svg'));
+ui.tabSymbols.addEventListener('click', () => setPane('symbols'));
 ui.modeCut.addEventListener('click', () => setMode('cut'));
 ui.modeRaise.addEventListener('click', () => setMode('raise'));
 ui.deselect.addEventListener('click', deselect);
 ui.text.addEventListener('input', scheduleSourceEdit);
-ui.svg.addEventListener('input', scheduleSourceEdit);
+ui.svg.addEventListener('input', () => {
+  // Hand-edited markup is no longer the icon or file it came from.
+  if (!formLock) svgLabel = '';
+  scheduleSourceEdit();
+});
+ui.font.addEventListener('change', scheduleSourceEdit);
+ui.fontRemove.addEventListener('click', dropFont);
+ui.fontLoad.addEventListener('click', addFontLink);
+ui.fontUrl.addEventListener('keydown', (event) => {
+  if (event.key === 'Enter') {
+    event.preventDefault();
+    addFontLink();
+  }
+});
+ui.symLib.addEventListener('change', () => {
+  touch();
+  loadSymbols();
+});
+ui.symQuery.addEventListener('input', scheduleSymbolSearch);
 ui.apply.addEventListener('click', bake);
 ui.undo.addEventListener('click', undo);
 ui.reset.addEventListener('click', resetSource);
-ui.download.addEventListener('click', download);
+ui.auto.addEventListener('change', touch);
+ui.dir.addEventListener('click', pickDir);
+ui.dirClear.addEventListener('click', clearDir);
+ui.download.addEventListener('click', exportStl);
+ui.saveProject.addEventListener('click', saveProject);
+ui.newProject.addEventListener('click', newProject);
+ui.roll.addEventListener('click', openRoll);
+ui.theme.addEventListener('change', () => applyTheme(ui.theme.value));
+ui.lang.addEventListener('change', () => setLang(ui.lang.value));
+controls.addEventListener('end', touch);
 
 bindPair(ui.height, ui.heightNum, onGeomInput);
 bindPair(ui.depth, ui.depthNum, onGeomInput);
 bindPair(ui.rotation, ui.rotationNum, onGeomInput);
 ui.offU.addEventListener('input', onGeomInput);
 ui.offV.addEventListener('input', onGeomInput);
-
-ui.fileSvg.addEventListener('change', () => {
-  const file = ui.fileSvg.files && ui.fileSvg.files[0];
-  if (!file) return;
-  file.text().then((text) => useSvg(text, `SVG «${file.name}»`));
-});
-
-for (const preset of PRESETS) {
-  const button = document.createElement('button');
-  button.type = 'button';
-  button.textContent = preset.name;
-  button.addEventListener('click', () => useSvg(preset.svg, `Заготовка «${preset.name}»`));
-  ui.presets.append(button);
-}
 
 const canvas = renderer.domElement;
 const CLICK_SLOP = 9;
@@ -894,14 +1808,15 @@ function endStampPress(done, event) {
   moveFrame = 0;
   canvas.style.cursor = '';
   if (!done.dragging) return;
-  if (event) dragTo(done.stamp, event.clientX + done.dx, event.clientY + done.dy);
+  if (event && diceMesh) dragTo(done.stamp, event.clientX + done.dx, event.clientY + done.dy);
   if (done.stamp.id === selectedId) {
     formLock = true;
     ui.offU.value = '0';
     ui.offV.value = '0';
     formLock = false;
   }
-  setStatus('Штамп перенесён и лёг по поверхности.');
+  setStatus('status.dragged');
+  touch();
 }
 
 // Capture phase: this must run before OrbitControls so a grabbed stamp does not also spin the camera.
@@ -952,7 +1867,12 @@ canvas.addEventListener('pointerup', (event) => {
   if (!wasClick || busy || !diceMesh) return;
   const hit = hitAt(event.clientX, event.clientY);
   if (!hit) {
-    setStatus('Клик мимо модели.');
+    setStatus('status.missedModel');
+    return;
+  }
+  if (!solidReady) {
+    // A stamp could never be applied to an open mesh, so it is not placed at all.
+    setStatus('model.notSolid');
     return;
   }
   if (event.shiftKey && selectedStamp()) moveSelected(hit);
@@ -967,12 +1887,16 @@ canvas.addEventListener('pointercancel', (event) => {
 });
 
 window.addEventListener('keydown', (event) => {
+  if (roller.isOpen()) {
+    if (event.key === 'Escape') roller.close();
+    return;
+  }
   if (event.key === 'Escape') {
     deselect();
     return;
   }
   const tag = document.activeElement && document.activeElement.tagName;
-  if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+  if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
   if (event.key === 'Delete' || event.key === 'Backspace') {
     if (selectedId != null) {
       event.preventDefault();
@@ -986,7 +1910,7 @@ window.addEventListener('keydown', (event) => {
 
 window.addEventListener('dragover', (event) => {
   event.preventDefault();
-  ui.drop.hidden = false;
+  if (!roller.isOpen()) ui.drop.hidden = false;
 });
 window.addEventListener('dragleave', (event) => {
   if (event.target === document.documentElement) ui.drop.hidden = true;
@@ -994,46 +1918,75 @@ window.addEventListener('dragleave', (event) => {
 window.addEventListener('drop', (event) => {
   event.preventDefault();
   ui.drop.hidden = true;
+  if (roller.isOpen()) return;
   const file = event.dataTransfer && event.dataTransfer.files && event.dataTransfer.files[0];
-  if (!file) return;
-  if (/\.svg$/i.test(file.name)) {
-    file.text().then((text) => useSvg(text, `SVG «${file.name}»`));
-    return;
-  }
-  if (/\.stl$/i.test(file.name)) {
-    file.arrayBuffer().then((buffer) => loadArrayBuffer(buffer, file.name));
-    return;
-  }
-  setStatus('Нужен файл STL или SVG.');
+  if (file) openFile(file);
+});
+
+// A reload right after an edit must not lose it to the save delay.
+window.addEventListener('pagehide', () => {
+  if (saveTimer) saveSession();
+});
+
+for (const [code, name] of LANGS) {
+  const option = document.createElement('option');
+  option.value = code;
+  option.textContent = name;
+  ui.lang.append(option);
+}
+ui.lang.value = getLang();
+
+for (const lib of LIBRARIES) {
+  const option = document.createElement('option');
+  option.value = lib.id;
+  option.textContent = lib.type === 'emoji' ? `Emoji · ${lib.name}` : lib.name;
+  ui.symLib.append(option);
+}
+
+applyI18n();
+applyTheme(document.documentElement.dataset.theme);
+redrawTexts();
+renderSymbols();
+
+onLangChange(() => {
+  redrawTexts();
+  // Emoji names are per language; icon names stay English.
+  if (library(ui.symLib.value).type === 'emoji' && symbols.phase !== 'idle') loadSymbols();
+  else renderSymbols();
 });
 
 new ResizeObserver(resize).observe(ui.stage);
 resize();
 animate();
-syncButtons();
 
 if (location.protocol === 'file:') {
-  ui.engine.textContent = 'Откройте через Docker или GitHub Pages';
-  setStatus('Со страницы с диска модули не загрузятся. Поднимите контейнер или откройте сайт репозитория.');
+  setEngine('engine.fromDisk');
+  setStatus('status.fromDisk');
 }
 
 const enginePromise = initManifold()
   .then(() => {
     engineReady = true;
-    ui.engine.textContent = font ? 'Движок и шрифт готовы' : 'Движок готов';
+    setEngine(fontReady ? 'engine.readyFont' : 'engine.ready');
     syncButtons();
   })
   .catch((error) => {
-    ui.engine.textContent = 'Движок не загрузился';
-    setStatus('Не удалось скачать расчёт геометрии. Проверьте интернет.');
+    setEngine('engine.failed');
+    setStatus('status.engineFailed');
     throw error;
   });
 
-opentype.load(FONT_URL, (error, loaded) => {
-  if (error || !loaded) {
-    setStatus('Шрифт не загрузился. Текст недоступен, SVG работает.');
-    return;
-  }
-  font = loaded;
-  if (engineReady) ui.engine.textContent = 'Движок и шрифт готовы';
-});
+const fontPromise = loadBuiltinFont()
+  .then(() => {
+    fontReady = true;
+    refreshFontList();
+    if (engineReady) setEngine('engine.readyFont');
+  })
+  .catch(() => {
+    setStatus('status.fontFailed');
+  });
+
+// Warmed up in the background so the first emoji does not wait for a download.
+ensureEmoji().catch(() => {});
+
+Promise.allSettled([enginePromise, fontPromise]).then(restoreCache);

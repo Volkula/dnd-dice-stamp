@@ -1,5 +1,7 @@
 // 2D contours for text and SVG. Y grows down in source data; callers flip to Y-up.
 
+import { AppError } from './i18n.js?v=4';
+
 const NUM = '[-+]?(?:\\d*\\.\\d+|\\d+)(?:[eE][-+]?\\d+)?';
 const TOKEN = new RegExp(`[MmLlHhVvCcSsQqTtAaZz]|${NUM}`, 'g');
 
@@ -50,7 +52,7 @@ export function fitContours(contours, height) {
   const h = maxY - minY;
   const w = maxX - minX;
   if (!(h > 0) || !(w > 0)) {
-    throw new Error('Пустой рисунок');
+    throw new AppError('err.emptyArt');
   }
   const s = height / h;
   const cx = (minX + maxX) / 2;
@@ -553,14 +555,14 @@ function hrefOf(el) {
 
 export function artworkFromSvg(svgText) {
   if (typeof DOMParser === 'undefined') {
-    throw new Error('SVG разбирается только в браузере');
+    throw new AppError('err.svgParse');
   }
   const doc = new DOMParser().parseFromString(svgText, 'image/svg+xml');
   if (doc.querySelector('parsererror')) {
-    throw new Error('SVG не разбирается');
+    throw new AppError('err.svgParse');
   }
   const root = doc.querySelector('svg');
-  if (!root) throw new Error('В файле нет тега svg');
+  if (!root) throw new AppError('err.svgNoRoot');
   const classes = classMap(doc);
   const contours = [];
   let evenOdd = false;
@@ -619,36 +621,10 @@ export function artworkFromSvg(svgText) {
 
   walk(root, identity(), { fill: '#000', rule: 'nonzero' }, 0, new Set());
   if (!contours.length) {
-    throw new Error('В SVG нет залитых контуров. Обводка без заливки не подойдёт.');
+    throw new AppError('err.svgNoFill');
   }
   return {
     contours: flipY(contours),
     fillRule: evenOdd ? 'EvenOdd' : 'NonZero',
-  };
-}
-
-export function artworkFromText(font, text, fontSize) {
-  const missing = [];
-  for (const ch of text) {
-    if (ch === ' ' || ch === '\n' || ch === '\t') continue;
-    const glyph = font.charToGlyph(ch);
-    if (!glyph || glyph.name === '.notdef' || glyph.index === 0) missing.push(ch);
-  }
-  const lines = text.split(/\n/);
-  const contours = [];
-  let y = 0;
-  const lineHeight = fontSize * 1.25;
-  for (const line of lines) {
-    if (line.length) {
-      const path = font.getPath(line, 0, y, fontSize);
-      contours.push(...contoursFromOpentypePath(path, Math.max(fontSize * 0.004, 0.01)));
-    }
-    y += lineHeight;
-  }
-  if (!contours.length) throw new Error('Нет контура. Введите текст или символ.');
-  return {
-    contours: flipY(contours),
-    fillRule: 'NonZero',
-    missing,
   };
 }

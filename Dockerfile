@@ -6,11 +6,7 @@ LABEL version="1.0"
 
 RUN rm -rf /usr/share/nginx/html/*
 
-COPY index.html /usr/share/nginx/html/
-COPY styles.css /usr/share/nginx/html/
-COPY app.js /usr/share/nginx/html/
-COPY stamp.js /usr/share/nginx/html/
-COPY geom2d.js /usr/share/nginx/html/
+COPY index.html styles.css *.js /usr/share/nginx/html/
 COPY samples /usr/share/nginx/html/samples
 COPY nginx.conf /etc/nginx/conf.d/default.conf
 

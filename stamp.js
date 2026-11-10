@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { mergeVertices } from 'three/addons/utils/BufferGeometryUtils.js';
 import Module from 'manifold-3d';
+import { AppError } from './i18n.js?v=4';
 
 const WASM = 'https://cdn.jsdelivr.net/npm/manifold-3d@3.5.4/manifold.wasm';
 
@@ -25,7 +26,7 @@ function zShift(depth, mode) {
 function sectionFrom(contours, fillRule) {
   const { CrossSection } = api;
   const cleaned = contours.filter((c) => c && c.length >= 3);
-  if (!cleaned.length) throw new Error('Нет контура');
+  if (!cleaned.length) throw new AppError('err.noContour');
   let cs = new CrossSection(cleaned, fillRule || 'NonZero');
   if (Math.abs(cs.area()) < 1e-8) {
     cs.delete();
@@ -33,7 +34,7 @@ function sectionFrom(contours, fillRule) {
   }
   if (Math.abs(cs.area()) < 1e-8) {
     cs.delete();
-    throw new Error('Контур без площади. Для SVG нужна заливка, не одна обводка.');
+    throw new AppError('err.noArea');
   }
   return cs;
 }
@@ -137,15 +138,16 @@ export function flipWinding(geometry) {
   return geo;
 }
 
-const STATUS_TEXT = {
-  NonFiniteVertex: 'В сетке есть бесконечные или пустые координаты.',
-  NotManifold: 'Сетка не цельная: есть дыры, двойные стенки или рваные края.',
-  InvalidConstruction: 'Из контура не получилось твёрдое тело.',
-  ResultTooLarge: 'Результат слишком большой для расчёта.',
+const STATUS_KEYS = {
+  NonFiniteVertex: 'err.solid.nonFinite',
+  NotManifold: 'err.solid.notManifold',
+  InvalidConstruction: 'err.solid.invalid',
+  ResultTooLarge: 'err.solid.tooLarge',
 };
 
-export function describeStatus(status) {
-  return STATUS_TEXT[status] || `Геометрия не собралась (${status}).`;
+function statusError(status) {
+  const key = STATUS_KEYS[status];
+  return key ? new AppError(key) : new AppError('err.solid.other', { status });
 }
 
 export function prepareSolid(geometry, { autoFlip = true } = {}) {
@@ -158,9 +160,7 @@ export function prepareSolid(geometry, { autoFlip = true } = {}) {
     try {
       solid = geometryToManifold(current);
       const status = solid.status();
-      if (status !== 'NoError') {
-        throw new Error(describeStatus(status));
-      }
+      if (status !== 'NoError') throw statusError(status);
       const volume = solid.volume();
       solid.delete();
       if (volume < 0 && autoFlip && attempt === 0) {
@@ -179,16 +179,15 @@ export function prepareSolid(geometry, { autoFlip = true } = {}) {
       }
     }
   }
-  const message = lastError && lastError.message
-    ? lastError.message
-    : 'Модель не замкнута. Нужен цельный STL без дыр.';
-  const wrapped = new Error(message);
+  const wrapped = lastError && lastError.key
+    ? new AppError(lastError.key, lastError.params)
+    : new AppError('err.solid.open');
   wrapped.geometry = current;
   throw wrapped;
 }
 
 export function applyStamps(geometry, jobs) {
-  if (!api) throw new Error('Движок ещё не загрузился');
+  if (!api) throw new AppError('err.engineNotReady');
   const created = [];
   const track = (solid) => {
     created.push(solid);
@@ -197,23 +196,22 @@ export function applyStamps(geometry, jobs) {
   try {
     let current = track(geometryToManifold(geometry));
     const baseStatus = current.status();
-    if (baseStatus !== 'NoError') throw new Error(describeStatus(baseStatus));
+    if (baseStatus !== 'NoError') throw statusError(baseStatus);
 
     jobs.forEach((job, index) => {
-      let tool = null;
       try {
-        tool = track(extrudeLocal(job.contours, job.fillRule, job.depth, job.mode));
+        const tool = track(extrudeLocal(job.contours, job.fillRule, job.depth, job.mode));
         const world = track(tool.transform(job.matrix));
-        const next = job.mode === 'raise' ? current.add(world) : current.subtract(world);
-        track(next);
+        const next = track(job.mode === 'raise' ? current.add(world) : current.subtract(world));
         const status = next.status();
-        if (status !== 'NoError') {
-          throw new Error(`Штамп ${index + 1}: ${describeStatus(status)}`);
-        }
+        if (status !== 'NoError') throw statusError(status);
         current = next;
       } catch (error) {
-        if (error.message && error.message.startsWith('Штамп')) throw error;
-        throw new Error(`Штамп ${index + 1}: ${error.message || 'не удалось построить'}`);
+        // The reason stays a key so the whole line can be re-read in another language.
+        const reason = error && error.key
+          ? { key: error.key, params: error.params }
+          : { key: 'err.stampBuild' };
+        throw new AppError('err.stampN', { n: index + 1, reason });
       }
     });
 
