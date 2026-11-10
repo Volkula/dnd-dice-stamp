@@ -77,20 +77,19 @@ const ui = {
 };
 
 const scene = new THREE.Scene();
-scene.background = new THREE.Color('#3a3228');
-scene.add(new THREE.AmbientLight(0xfff6ea, 0.85));
-scene.add(new THREE.HemisphereLight(0xfff8ee, 0x6a5640, 0.9));
-const key = new THREE.DirectionalLight(0xfff8ee, 2.6);
+scene.background = new THREE.Color('#2a241c');
+scene.add(new THREE.HemisphereLight(0xfff4e4, 0x3a3026, 0.9));
+const key = new THREE.DirectionalLight(0xfff8ee, 1.5);
 key.position.set(50, -90, 80);
 scene.add(key);
-const fill = new THREE.DirectionalLight(0xd5e2ef, 1.3);
+const fill = new THREE.DirectionalLight(0xc5d4e4, 0.5);
 fill.position.set(-70, 50, 30);
 scene.add(fill);
 
 const camera = new THREE.PerspectiveCamera(40, 1, 0.01, 5000);
 camera.up.set(0, 0, 1);
 camera.position.set(30, -40, 24);
-const headlamp = new THREE.DirectionalLight(0xfff4e4, 1.8);
+const headlamp = new THREE.DirectionalLight(0xfff4e4, 0.5);
 headlamp.position.set(12, -18, 8);
 camera.add(headlamp);
 scene.add(camera);
@@ -99,7 +98,7 @@ const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
-renderer.toneMappingExposure = 1.15;
+renderer.toneMappingExposure = 1;
 ui.stage.prepend(renderer.domElement);
 
 const controls = new OrbitControls(camera, renderer.domElement);
@@ -232,8 +231,6 @@ function replaceGeometry(geometry, { keepSource = false } = {}) {
       color: ui.color.value,
       roughness: 0.48,
       metalness: 0.04,
-      emissive: 0x4a3b2c,
-      emissiveIntensity: 0.45,
       side: THREE.DoubleSide,
     }));
     diceMesh.material.flatShading = !ui.smooth.checked;
