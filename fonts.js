@@ -1,6 +1,6 @@
 import opentype from 'opentype.js';
-import { AppError } from './i18n.js?v=7';
-import { contoursFromOpentypePath, flipY } from './geom2d.js?v=7';
+import { AppError } from './i18n.js?v=8';
+import { contoursFromOpentypePath, flipY } from './geom2d.js?v=8';
 
 const ROBOTO_URL = 'https://cdn.jsdelivr.net/gh/googlefonts/roboto@2.138/src/hinted/Roboto-Regular.ttf';
 const EMOJI_URL = 'https://cdn.jsdelivr.net/fontsource/fonts/noto-emoji@latest/emoji-400-normal.ttf';

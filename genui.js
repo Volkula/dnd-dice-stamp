@@ -2,9 +2,10 @@
 
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
-import { t } from './i18n.js?v=7';
+import { t } from './i18n.js?v=8';
 import {
   SHAPES,
+  GROUPS,
   CAPS,
   MIN_OUTCOMES,
   MAX_OUTCOMES,
@@ -12,7 +13,7 @@ import {
   planDie,
   buildDie,
   fitHeight,
-} from './dicegen.js?v=7';
+} from './dicegen.js?v=8';
 
 const SETTINGS_KEY = 'dice.gen';
 const MAX_BATCH = 12;
@@ -255,9 +256,11 @@ export function createGenerator({ engine, onAdd }) {
     if (plan.faces > 2) {
       if (shape.kind === 'roll') lines.push(t('gen.info.roll'));
       if (shape.kind === 'ends') lines.push(t('gen.info.ends'));
-      lines.push(t(plan.top ? 'gen.info.top' : 'gen.info.bottom'));
+      if (shape.lopsided) lines.push(t('gen.info.lopsided'));
+      else lines.push(t(plan.top ? 'gen.info.top' : 'gen.info.bottom'));
     }
-    if (shape.themed) lines.push(t('gen.info.themed'));
+    if (shape.awkward) lines.push(t('gen.info.awkward'));
+    else if (shape.themed) lines.push(t('gen.info.themed'));
     return lines.join(' ');
   }
 
@@ -338,13 +341,20 @@ export function createGenerator({ engine, onAdd }) {
     onAdd(specs, number);
   }
 
-  for (const shape of SHAPES) {
-    const option = document.createElement('option');
-    option.value = shape.id;
-    ui.shape.append(option);
-  }
+  const groups = GROUPS.map((group) => {
+    const element = document.createElement('optgroup');
+    for (const shape of SHAPES) {
+      if (shape.group !== group.id) continue;
+      const option = document.createElement('option');
+      option.value = shape.id;
+      element.append(option);
+    }
+    ui.shape.append(element);
+    return { element, nameKey: group.nameKey };
+  });
 
   function nameShapes() {
+    for (const group of groups) group.element.label = t(group.nameKey);
     for (const option of ui.shape.options) option.textContent = t(shapeById(option.value).nameKey);
   }
 
