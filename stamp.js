@@ -1,7 +1,8 @@
 import * as THREE from 'three';
 import { mergeVertices } from 'three/addons/utils/BufferGeometryUtils.js';
+import { MeshBVH } from 'three-mesh-bvh';
 import Module from 'manifold-3d';
-import { AppError } from './i18n.js?v=10';
+import { AppError } from './i18n.js?v=11';
 
 const WASM = 'https://cdn.jsdelivr.net/npm/manifold-3d@3.5.4/manifold.wasm';
 
@@ -270,7 +271,9 @@ export function padPreview(geometry, job) {
   }
 }
 
-function geometryToManifold(geometry) {
+// id: a number the triangles of this model keep through the booleans, so those of the result
+// that came from the model can be told from those a tool has made.
+function geometryToManifold(geometry, id = null) {
   const { Manifold, Mesh } = api;
   const welded = weld(geometry);
   const pos = welded.getAttribute('position');
@@ -283,7 +286,82 @@ function geometryToManifold(geometry) {
   }
   const triVerts = new Uint32Array(index.count);
   for (let i = 0; i < index.count; i++) triVerts[i] = index.getX(i);
-  return new Manifold(new Mesh({ numProp: 3, vertProperties, triVerts }));
+  const options = { numProp: 3, vertProperties, triVerts };
+  if (id !== null) {
+    options.runIndex = new Uint32Array([0, triVerts.length]);
+    options.runOriginalID = new Uint32Array([id]);
+  }
+  return new Manifold(new Mesh(options));
+}
+
+// Which triangles of a model are the surface of a sign: one flag per triangle, kept in the
+// geometry's userData. The tray paints them; they are no part of the shape.
+export function inkOf(geometry) {
+  const ink = geometry.userData && geometry.userData.ink;
+  if (!(ink instanceof Uint8Array)) return null;
+  const index = geometry.getIndex();
+  const triangles = (index ? index.count : geometry.getAttribute('position').count) / 3;
+  return ink.length === triangles ? ink : null;
+}
+
+// The flags for the result of a boolean. What a tool has made is ink when the tools were signs.
+// What came from the model keeps the flag of the triangle it was a part of.
+function inkAfter(mesh, baseId, before, tools) {
+  const old = inkOf(before);
+  if (!old && !tools) return null;
+  const runs = mesh.runOriginalID;
+  const starts = mesh.runIndex;
+  if (!runs || !starts) return null;
+  const flags = new Uint8Array(mesh.triVerts.length / 3);
+  let tree = null;
+  let any = false;
+  const stride = mesh.numProp || 3;
+  const at = (corner, axis) => mesh.vertProperties[mesh.triVerts[corner] * stride + axis];
+  const middle = new THREE.Vector3();
+  const found = {};
+  for (let run = 0; run < runs.length; run++) {
+    const first = starts[run] / 3;
+    const last = starts[run + 1] / 3;
+    if (runs[run] !== baseId) {
+      if (tools) {
+        flags.fill(1, first, last);
+        any = any || last > first;
+      }
+      continue;
+    }
+    if (!old) continue;
+    if (!tree) tree = new MeshBVH(before, { indirect: true });
+    for (let i = first; i < last; i++) {
+      const c = i * 3;
+      middle.set(
+        (at(c, 0) + at(c + 1, 0) + at(c + 2, 0)) / 3,
+        (at(c, 1) + at(c + 1, 1) + at(c + 2, 1)) / 3,
+        (at(c, 2) + at(c + 1, 2) + at(c + 2, 2)) / 3,
+      );
+      const hit = tree.closestPointToPoint(middle, found);
+      if (hit && old[hit.faceIndex]) {
+        flags[i] = 1;
+        any = true;
+      }
+    }
+  }
+  return any ? flags : null;
+}
+
+// The convex hull of a model as a mesh: the shape a die rolls on.
+export function hullGeometry(geometry) {
+  if (!api) throw new AppError('err.engineNotReady');
+  const position = geometry.getAttribute('position');
+  // A very dense mesh gives every other vertex or so: its hull hardly changes.
+  const stride = Math.max(1, Math.floor(position.count / 60000));
+  const points = [];
+  for (let i = 0; i < position.count; i += stride) points.push([position.getX(i), position.getY(i), position.getZ(i)]);
+  const hull = api.Manifold.hull(points);
+  try {
+    return meshToGeometry(hull.getMesh());
+  } finally {
+    hull.delete();
+  }
 }
 
 export function weld(geometry) {
@@ -393,7 +471,8 @@ export function prepareSolid(geometry, { autoFlip = true } = {}) {
   throw wrapped;
 }
 
-export function applyStamps(geometry, jobs) {
+// ink: the jobs are signs, so the surface they make is flagged as paintable, see inkOf.
+export function applyStamps(geometry, jobs, { ink = false } = {}) {
   if (!api) throw new AppError('err.engineNotReady');
   const created = [];
   const track = (solid) => {
@@ -401,7 +480,8 @@ export function applyStamps(geometry, jobs) {
     return solid;
   };
   try {
-    let current = track(geometryToManifold(geometry));
+    const baseId = api.Manifold.reserveIDs(1);
+    let current = track(geometryToManifold(geometry, baseId));
     const baseStatus = current.status();
     if (baseStatus !== 'NoError') throw statusError(baseStatus);
 
@@ -422,7 +502,11 @@ export function applyStamps(geometry, jobs) {
       }
     });
 
-    return meshToGeometry(current.getMesh());
+    const mesh = current.getMesh();
+    const next = meshToGeometry(mesh);
+    const flags = inkAfter(mesh, baseId, geometry, ink);
+    if (flags) next.userData = { ink: flags };
+    return next;
   } finally {
     for (const solid of created) solid.delete();
   }

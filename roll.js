@@ -4,7 +4,8 @@
 
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
-import { t } from './i18n.js?v=10';
+import { t } from './i18n.js?v=11';
+import { MATERIALS, materialById, gramsOf, massProps, principalAxes } from './balance.js?v=11';
 
 const RAPIER_URL = 'https://cdn.jsdelivr.net/npm/@dimforge/rapier3d-compat@0.14.0/rapier.es.js';
 const STEP = 1 / 240;
@@ -40,6 +41,11 @@ const TOWER = { slope: 0.6, chute: 0.5, board: 0.5, pause: 0.22 };
 // many times in a throw, and the seconds it gets to lie down after that.
 const NUDGE = { spin: 1.6, most: 3, time: 1.5 };
 const HAND = { pull: 14, fastest: 260, lift: 2.5 };
+// Two presses on one die this close together, in milliseconds and in pixels, throw it anew.
+const DOUBLE_PRESS = 400;
+const DOUBLE_REACH = 14;
+// The paint in the signs when none was chosen: dark on a light die, light on a dark one.
+const INK = { dark: '#1d1612', light: '#f6ecd2' };
 const VIEW_DIRECTION = new THREE.Vector3(0, -34, 32).normalize();
 const SETTINGS_KEY = 'dice.roll';
 const LIMITS = {
@@ -86,6 +92,11 @@ function readSettings() {
     size: clampSetting('size', saved.size),
     weight: clampSetting('weight', saved.weight),
     speed: Math.round(clampSetting('speed', saved.speed) * 4) / 4,
+    // 'manual' takes the weight from the slider; a material counts it from the die's volume.
+    material: saved.material === 'manual' || materialById(saved.material) ? saved.material : 'resin',
+    // The signs of the dice are painted. The paint is a colour only: it weighs nothing.
+    ink: saved.ink !== false,
+    inkColor: /^#[0-9a-f]{6}$/i.test(saved.inkColor || '') ? saved.inkColor : null,
   };
 }
 
@@ -261,6 +272,9 @@ export function createRoller() {
     sizeOut: $('roll-size-out'),
     weightOut: $('roll-weight-out'),
     speedOut: $('roll-speed-out'),
+    material: $('roll-material'),
+    ink: $('roll-ink'),
+    inkColor: $('roll-ink-color'),
   };
 
   const settings = readSettings();
@@ -272,6 +286,18 @@ export function createRoller() {
   let baseSize = 1;
   let scaled = null;
   let material = null;
+  // The same die lit up under the pointer, and the paint in its signs.
+  let hotMaterial = null;
+  let inkMaterial = null;
+  let bodyColor = '#d7c4a3';
+  // True when the model says which of its triangles are signs.
+  let inked = false;
+  // Volume, centre of mass and inertia of the model as it came, in its own units. Null for a mesh with no inside.
+  let props = null;
+  // The die under the pointer or the one whose result is: its place in `dice`, or -1.
+  let hot = -1;
+  // The last press on a die: { die, at, x, y }.
+  let pressed = null;
   let marks = [];
   let flats = [];
   let tie = TIE;
@@ -418,11 +444,85 @@ export function createRoller() {
     new ResizeObserver(resize).observe(ui.stage);
   }
 
+  // Grams of one die: counted from its volume at the chosen size and the material, or the slider's.
+  function weightNow() {
+    const made = materialById(settings.material);
+    if (!made || !props) return settings.weight;
+    const side = settings.size / baseSize;
+    return Math.max(0.05, gramsOf(props.volume * side * side * side, made.density));
+  }
+
   function showOutputs() {
+    const grams = weightNow();
+    // A weight counted from the material is shown on the slider but cannot be dragged.
+    const counted = Boolean(props && materialById(settings.material));
     ui.countOut.textContent = String(settings.count);
     ui.sizeOut.textContent = t('roll.mm', { n: settings.size });
-    ui.weightOut.textContent = t('roll.g', { n: settings.weight });
+    ui.weightOut.textContent = t('roll.g', { n: counted ? Number(grams.toFixed(grams < 10 ? 1 : 0)) : settings.weight });
     ui.speedOut.textContent = `×${settings.speed}`;
+    ui.weight.disabled = counted;
+    ui.weight.value = String(counted ? clampSetting('weight', grams) : settings.weight);
+  }
+
+  function showMaterials() {
+    ui.material.replaceChildren();
+    const add = (value, text) => {
+      const option = document.createElement('option');
+      option.value = value;
+      option.textContent = text;
+      ui.material.append(option);
+    };
+    add('manual', t('roll.manual'));
+    for (const made of MATERIALS) add(made.id, t(made.key));
+    ui.material.value = settings.material;
+  }
+
+  function saveSettings() {
+    try {
+      localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+    } catch {
+      // Settings then last for this visit only.
+    }
+  }
+
+  function inkColorNow() {
+    if (settings.inkColor) return settings.inkColor;
+    const tone = new THREE.Color(bodyColor);
+    return 0.2126 * tone.r + 0.7152 * tone.g + 0.0722 * tone.b > 0.2 ? INK.dark : INK.light;
+  }
+
+  // What a die is drawn with: its body, lit up when it is the hot one, and the paint of its signs.
+  function skin(lit) {
+    const body = lit ? hotMaterial : material;
+    return inked && settings.ink ? [body, inkMaterial] : body;
+  }
+
+  function paint() {
+    if (inkMaterial) {
+      inkMaterial.color.set(inkColorNow());
+      // A little light of its own, so a pale sign reads in the shade too.
+      inkMaterial.emissive.set(inkColorNow()).multiplyScalar(0.18);
+    }
+    dice.forEach((die, i) => {
+      die.mesh.material = skin(i === hot);
+    });
+    ui.inkColor.value = inkColorNow();
+    // A model that does not say where its signs are has nothing to paint.
+    ui.ink.disabled = !inked;
+    ui.inkColor.disabled = !inked || !settings.ink;
+    ui.ink.closest('label').title = inked ? '' : t('roll.inkNone');
+  }
+
+  // Lights up one die together with its result in the strip. -1 lights none.
+  function setHot(index) {
+    if (index === hot) return;
+    hot = index;
+    dice.forEach((die, i) => {
+      die.mesh.material = skin(i === hot);
+    });
+    for (const chip of ui.result.querySelectorAll('.chip')) {
+      chip.classList.toggle('is-hot', Number(chip.dataset.die) === hot);
+    }
   }
 
   function showResult() {
@@ -444,12 +544,19 @@ export function createRoller() {
     }
     const chips = document.createElement('div');
     chips.className = 'chips';
-    for (const label of labels) {
+    labels.forEach((label, i) => {
       const chip = document.createElement('span');
       chip.className = label == null ? 'chip is-unknown' : 'chip';
+      chip.classList.toggle('is-hot', i === hot);
       chip.textContent = label == null ? '?' : label;
+      chip.title = t('roll.chipHint');
+      // The strip and the tray point at each other: a result lights its die, a die its result.
+      chip.dataset.die = String(i);
+      chip.addEventListener('pointerenter', () => setHot(i));
+      chip.addEventListener('pointerleave', () => setHot(-1));
+      chip.addEventListener('dblclick', () => rethrow(dice[i]));
       chips.append(chip);
-    }
+    });
     ui.result.append(chips);
     const numbers = labels.map((label) => (label == null ? null : numberOf(label)));
     if (labels.length > 1 && numbers.every((n) => n != null)) {
@@ -490,6 +597,8 @@ export function createRoller() {
     letGo();
     for (const die of dice) view.scene.remove(die.mesh);
     dice = [];
+    hot = -1;
+    pressed = null;
     if (world) {
       world.free();
       world = null;
@@ -574,8 +683,10 @@ export function createRoller() {
     buildTray();
     buildTower();
 
-    // The slider cannot change how gravity pulls, so weight shows as a slower, deader throw.
-    const heft = (settings.weight - LIMITS.weight[0]) / (LIMITS.weight[1] - LIMITS.weight[0]);
+    // Weight cannot change how gravity pulls, so it shows as a slower, deader throw.
+    const grams = weightNow();
+    const heft = Math.min(1, Math.max(0, (grams - LIMITS.weight[0]) / (LIMITS.weight[1] - LIMITS.weight[0])));
+    const balance = bodyProps(k, grams, radius);
     const speed = 1.25 - 0.7 * heft;
     const bounce = 0.5 - 0.32 * heft;
     const gap = Math.max(edge * 1.6, radius * 2.2);
@@ -614,8 +725,12 @@ export function createRoller() {
           .setCcdEnabled(true),
       );
       const shape = rapier.ColliderDesc.convexHull(points) || rapier.ColliderDesc.ball(radius);
-      world.createCollider(shape.setMass(settings.weight).setRestitution(bounce).setFriction(0.4), body);
-      const mesh = new THREE.Mesh(scaled, material);
+      // The die collides by its hull but weighs as it is: with its real centre of mass and
+      // inertia, so a side lightened by signs or a cut comes up a little more often.
+      if (balance) shape.setMassProperties(grams, balance.centre, balance.inertia, balance.frame);
+      else shape.setMass(grams);
+      world.createCollider(shape.setRestitution(bounce).setFriction(0.4), body);
+      const mesh = new THREE.Mesh(scaled, skin(false));
       mesh.castShadow = true;
       mesh.receiveShadow = true;
       view.scene.add(mesh);
@@ -631,6 +746,47 @@ export function createRoller() {
     setGoing(through);
     labels = [];
     syncMeshes();
+    showResult();
+  }
+
+  // The mass of the die for the engine, in the tray's units: scale k from the model's.
+  // Null when the model has no inside to weigh; the engine then takes the hull as solid.
+  function bodyProps(k, grams, radius) {
+    if (!props) return null;
+    const { moments, frame } = principalAxes(props.inertia);
+    const per = (grams / props.volume) * k * k;
+    const centre = { x: props.centre.x * k, y: props.centre.y * k, z: props.centre.z * k };
+    if (!moments.every((moment) => moment > 0) || Math.hypot(centre.x, centre.y, centre.z) > radius) return null;
+    return {
+      centre,
+      inertia: { x: moments[0] * per, y: moments[1] * per, z: moments[2] * per },
+      frame: { x: frame.x, y: frame.y, z: frame.z, w: frame.w },
+    };
+  }
+
+  // Throws one die anew from where it lies. The others stay as they are unless it lands on them.
+  function rethrow(die) {
+    if (!world || !die || !die.started || phase === 'loading' || phase === 'failed') return;
+    letGo();
+    const rand = (min, max) => min + Math.random() * (max - min);
+    const room = dieRadius + 0.5;
+    const p = die.body.translation();
+    const turn = new THREE.Quaternion().random();
+    const spin = new THREE.Vector3(rand(-1, 1), rand(-1, 1), rand(-1, 1)).normalize().multiplyScalar(rand(14, 30));
+    die.body.setTranslation({
+      x: Math.min(TRAY.width / 2 - room, Math.max(-TRAY.width / 2 + room, p.x)),
+      y: Math.min(TRAY.depth / 2 - room, Math.max(-TRAY.depth / 2 + room, p.y)),
+      z: TRAY.wall + dieRadius + 5,
+    }, true);
+    die.body.setRotation({ x: turn.x, y: turn.y, z: turn.z, w: turn.w }, true);
+    die.body.setLinvel({ x: rand(-30, 30), y: rand(-30, 30), z: rand(20, 60) }, true);
+    die.body.setAngvel({ x: spin.x, y: spin.y, z: spin.z }, true);
+    // It may have been in the hand a moment ago.
+    die.body.setGravityScale(1, true);
+    die.body.setLinearDamping(0.1);
+    die.body.setAngularDamping(0.15);
+    setGoing('hand');
+    labels = [];
     showResult();
   }
 
@@ -782,18 +938,39 @@ export function createRoller() {
     letGo(true);
   }
 
+  const onChip = (event) => Boolean(event.target && event.target.closest && event.target.closest('.chip'));
+
   function onStageDown(event) {
-    if (event.button !== 0 || phase === 'loading' || phase === 'failed') return;
+    if (event.button !== 0 || phase === 'loading' || phase === 'failed' || onChip(event)) return;
+    // A second press at the same place throws the die of the first one anew. The first press
+    // has lifted that die into the hand, so it is no longer under the pointer to be found there.
+    const again = pressed
+      && performance.now() - pressed.at < DOUBLE_PRESS
+      && Math.hypot(event.clientX - pressed.x, event.clientY - pressed.y) < DOUBLE_REACH
+      && dice.includes(pressed.die);
+    if (again) {
+      event.preventDefault();
+      event.stopPropagation();
+      const die = pressed.die;
+      pressed = null;
+      rethrow(die);
+      return;
+    }
     const die = dieAt(event);
     if (!die) return;
     // The camera must not turn while a die is carried.
     event.preventDefault();
     event.stopPropagation();
+    pressed = { die, at: performance.now(), x: event.clientX, y: event.clientY };
     grab(die, event);
   }
 
   function onStageHover(event) {
-    if (!held) ui.stage.classList.toggle('is-over-die', Boolean(dieAt(event)));
+    // A result in the strip lights its die by itself.
+    if (held || onChip(event)) return;
+    const die = dieAt(event);
+    ui.stage.classList.toggle('is-over-die', Boolean(die));
+    setHot(die ? dice.indexOf(die) : -1);
   }
 
   function syncMeshes() {
@@ -962,7 +1139,32 @@ export function createRoller() {
     view.renderer.render(view.scene, view.camera);
   }
 
-  async function open({ geometry, color, flat, marks: faceMarks }) {
+  // Puts the triangles of the signs last, as a second group, so they can have a paint of their own.
+  function groupInk(geometry, ink) {
+    const index = geometry.getIndex();
+    if (!index || !ink || ink.length !== index.count / 3 || !ink.includes(1)) return false;
+    const from = index.array;
+    const sorted = new from.constructor(from.length);
+    let o = 0;
+    let body = 0;
+    for (const flag of [0, 1]) {
+      for (let i = 0; i < ink.length; i++) {
+        if ((ink[i] ? 1 : 0) !== flag) continue;
+        sorted[o++] = from[i * 3];
+        sorted[o++] = from[i * 3 + 1];
+        sorted[o++] = from[i * 3 + 2];
+      }
+      if (flag === 0) body = o;
+    }
+    geometry.setIndex(new THREE.BufferAttribute(sorted, 1));
+    geometry.clearGroups();
+    geometry.addGroup(0, body, 0);
+    geometry.addGroup(body, from.length - body, 1);
+    return true;
+  }
+
+  // ink: one flag per triangle of the geometry, 1 for the surface of a sign; null when not known.
+  async function open({ geometry, color, flat, marks: faceMarks, ink = null }) {
     if (!view) buildView();
     opened = true;
     ui.root.hidden = false;
@@ -979,8 +1181,16 @@ export function createRoller() {
     base.translate(-center.x, -center.y, -center.z);
     baseSize = Math.max(size.x, size.y, size.z) || 1;
     flats = flatNormals(base);
-    if (material) material.dispose();
+    props = massProps(base);
+    inked = groupInk(base, ink);
+    for (const old of [material, hotMaterial, inkMaterial]) if (old) old.dispose();
+    bodyColor = color;
     material = new THREE.MeshStandardMaterial({ color, roughness: 0.48, metalness: 0.04, flatShading: flat });
+    hotMaterial = material.clone();
+    hotMaterial.emissive.set(0xe2b15a);
+    hotMaterial.emissiveIntensity = 0.5;
+    inkMaterial = new THREE.MeshStandardMaterial({ roughness: 0.55, metalness: 0.02, flatShading: flat });
+    paint();
     marks = faceMarks.map((mark) => ({ label: mark.label, normal: new THREE.Vector3().fromArray(mark.normal).normalize() }));
     tie = tieOf(marks);
 
@@ -1024,11 +1234,7 @@ export function createRoller() {
     });
     // Re-throw once the slider is released, not on every pixel of travel.
     input.addEventListener('change', () => {
-      try {
-        localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
-      } catch {
-        // Settings then last for this visit only.
-      }
+      saveSettings();
       // The dice go the way they went last time, except that a hand does not throw by itself.
       if (rethrow) throwDice(way === 'tower' ? 'tower' : 'tray');
     });
@@ -1039,7 +1245,27 @@ export function createRoller() {
   bindSlider(ui.weight, 'weight');
   // The speed takes hold at once, in the middle of a throw too.
   bindSlider(ui.speed, 'speed', false);
+  showMaterials();
   showOutputs();
+  ui.material.addEventListener('change', () => {
+    settings.material = ui.material.value === 'manual' || materialById(ui.material.value) ? ui.material.value : 'manual';
+    saveSettings();
+    showOutputs();
+    throwDice(way === 'tower' ? 'tower' : 'tray');
+  });
+  ui.ink.checked = settings.ink;
+  ui.ink.addEventListener('change', () => {
+    settings.ink = ui.ink.checked;
+    saveSettings();
+    paint();
+  });
+  ui.inkColor.value = inkColorNow();
+  ui.inkColor.addEventListener('input', () => {
+    settings.inkColor = ui.inkColor.value;
+    paint();
+  });
+  ui.inkColor.addEventListener('change', saveSettings);
+  ui.stage.addEventListener('pointerleave', () => setHot(-1));
   ui.again.addEventListener('click', () => throwDice('tray'));
   ui.tower.addEventListener('click', () => throwDice('tower'));
   // Ahead of the camera controls, which listen on the canvas inside the stage.
@@ -1056,6 +1282,7 @@ export function createRoller() {
     isOpen: () => opened,
     // Called when the language or the theme changes.
     refresh() {
+      showMaterials();
       showOutputs();
       showResult();
       if (view) view.scene.background = sceneColor();

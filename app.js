@@ -3,17 +3,19 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { STLLoader } from 'three/addons/loaders/STLLoader.js';
 import { STLExporter } from 'three/addons/exporters/STLExporter.js';
 import { MeshBVH } from 'three-mesh-bvh';
-import { artworkFromSvg, fitContours } from './geom2d.js?v=10';
+import { artworkFromSvg, fitContours } from './geom2d.js?v=11';
 import {
   initManifold,
   localToolGeometry,
   padPreview,
   prepareSolid,
   applyStamps,
+  hullGeometry,
+  inkOf,
   flipWinding,
   signedVolume,
   manifoldApi,
-} from './stamp.js?v=10';
+} from './stamp.js?v=11';
 import {
   LANGS,
   AppError,
@@ -26,8 +28,8 @@ import {
   onLangChange,
   applyI18n,
   locale,
-} from './i18n.js?v=10';
-import { cacheGet, cacheSet, cacheDel } from './store.js?v=10';
+} from './i18n.js?v=11';
+import { cacheGet, cacheSet, cacheDel } from './store.js?v=11';
 import {
   DEFAULT_FONT,
   EMOJI_CSS_FAMILY,
@@ -43,11 +45,24 @@ import {
   customFonts,
   needsEmoji,
   layoutText,
-} from './fonts.js?v=10';
-import { LIBRARIES, library, loadLibrary, searchItems } from './symbols.js?v=10';
-import { createRoller } from './roll.js?v=10';
-import { buildDie, fitHeight, shapeById, optionsFor, SHAPES } from './dicegen.js?v=10';
-import { createGenerator } from './genui.js?v=10';
+} from './fonts.js?v=11';
+import { LIBRARIES, library, loadLibrary, searchItems } from './symbols.js?v=11';
+import { createRoller } from './roll.js?v=11';
+import {
+  MATERIALS,
+  materialById,
+  gramsOf,
+  triangleCount,
+  massProps,
+  flatFaces,
+  touchingFaces,
+  roundDirections,
+  partsOf,
+  heatColor,
+  heatGeometry,
+} from './balance.js?v=11';
+import { buildDie, fitHeight, shapeById, optionsFor, SHAPES } from './dicegen.js?v=11';
+import { createGenerator } from './genui.js?v=11';
 import {
   PROJECT_APP,
   PROJECT_VERSION,
@@ -60,7 +75,7 @@ import {
   decodeGeometry,
   stampToData,
   stampFromData,
-} from './project.js?v=10';
+} from './project.js?v=11';
 
 const THEMES = ['midnight', 'day', 'contrast', 'sepia'];
 const THEME_KEY = 'dice.theme';
@@ -99,6 +114,25 @@ const PAD_SHAPES = {
   hexagon: { corners: 6, key: 'sign.padHexagon' },
 };
 const PAD_TILT = 85;
+
+const BALANCE = {
+  // Stamps that are placed but not applied are counted in only for a model of at most this many triangles.
+  stamped: 40000,
+  // Milliseconds of quiet before the balance is counted again.
+  wait: 400,
+  // The shift of the centre of mass as a share of the distance to a face: up to the first
+  // the die is even, up to the second it leans a little.
+  even: 0.0025,
+  slight: 0.01,
+  // The parts differ by at least this much before the map takes its full colours.
+  floor: 0.005,
+  // A count with the placed stamps that took longer than this many milliseconds is not
+  // repeated by itself after every change: it waits for its button. More stamps than `many`
+  // are taken to be that slow without trying.
+  slow: 500,
+  many: 60,
+  resin: 1.18,
+};
 
 const $ = (id) => document.getElementById(id);
 
@@ -180,6 +214,15 @@ const ui = {
   dirName: $('dir-name'),
   download: $('btn-download'),
   status: $('status'),
+  balMaterial: $('bal-material'),
+  balDensity: $('bal-density'),
+  balInfo: $('bal-info'),
+  balHeat: $('bal-heat'),
+  balLegend: $('bal-legend'),
+  balLow: $('bal-low'),
+  balHigh: $('bal-high'),
+  balDetails: $('bal-details'),
+  balParts: $('bal-parts'),
 };
 
 function cssVar(name, fallback) {
@@ -291,6 +334,15 @@ let active = null;
 let objectSeq = 1;
 let busy = false;
 let exportDir = null;
+// The last count of weight and balance for the active object, what it was counted for,
+// and the timer of the next one.
+let balance = null;
+let balanceKey = '';
+let balanceTimer = 0;
+// Set by the button that asks for the placed stamps to be counted in although that is slow.
+let balanceForced = false;
+// The heat map on the scene: { mesh, owner, uuid }. It stands in for the owner's own mesh.
+let heat = null;
 const canPickDir = typeof window.showDirectoryPicker === 'function';
 const generator = createGenerator({ engine: manifoldApi, onAdd: addGenerated, onApply: applyGenerated });
 
@@ -507,6 +559,8 @@ function createObject(id, name, color) {
     relief: null,
     // For a die made by the generator: { spec, number }, so its shape can be changed later.
     gen: null,
+    // True when weighing the model together with its placed stamps took too long to repeat freely.
+    slowBalance: false,
   };
   mesh.userData.owner = obj;
   return obj;
@@ -610,6 +664,7 @@ function clearHistory(obj) {
 }
 
 function disposeObject(obj) {
+  if (heat && heat.owner === obj) clearHeat();
   clearStamps(obj);
   clearHistory(obj);
   scene.remove(obj.group);
@@ -1035,12 +1090,13 @@ function setOnPad(obj, stamp, planes) {
 
 // The model with every placed stamp applied, and the marks its signs leave for the tray.
 // Pads go first: they change the surface, and a sign standing over a pad is set down on its face.
+// What the signs cut or add is remembered as paintable; what a pad cuts is plain surface.
 function stampedGeometry(obj) {
   const pads = obj.stamps.filter(isPad);
   const signs = obj.stamps.filter((stamp) => !isPad(stamp));
   const before = obj.mesh.geometry;
   if (!pads.length || !signs.length) {
-    return { geometry: applyStamps(before, stampJobs(obj)), marks: signs.map(markOf) };
+    return { geometry: applyStamps(before, stampJobs(obj), { ink: signs.length > 0 }), marks: signs.map(markOf) };
   }
   const cut = applyStamps(before, stampJobs(obj, pads));
   const slack = Math.max(2e-3, reachOf(obj) * 5e-5);
@@ -1063,7 +1119,7 @@ function stampedGeometry(obj) {
   obj.mesh.geometry = cut;
   try {
     for (const stamp of signs) setOnPad(obj, stamp, planes);
-    return { geometry: applyStamps(cut, stampJobs(obj, signs)), marks: signs.map(markOf) };
+    return { geometry: applyStamps(cut, stampJobs(obj, signs), { ink: true }), marks: signs.map(markOf) };
   } finally {
     obj.mesh.geometry = before;
     obj.relief = relief;
@@ -2076,6 +2132,310 @@ function syncPadForm() {
   ui.heightNum.disabled = whole;
 }
 
+// ---- Weight and balance ----
+
+const heatMat = new THREE.MeshStandardMaterial({
+  vertexColors: true,
+  roughness: 0.62,
+  metalness: 0,
+  flatShading: true,
+  side: THREE.DoubleSide,
+});
+
+function densityNow() {
+  const density = Number(ui.balDensity.value);
+  return density > 0 ? Math.min(25, Math.max(0.05, density)) : BALANCE.resin;
+}
+
+function fillMaterials() {
+  const chosen = ui.balMaterial.value || 'resin';
+  ui.balMaterial.replaceChildren();
+  for (const made of MATERIALS) {
+    const option = document.createElement('option');
+    option.value = made.id;
+    option.textContent = `${t(made.key)} · ${made.density.toLocaleString(locale())}`;
+    ui.balMaterial.append(option);
+  }
+  const own = document.createElement('option');
+  own.value = 'custom';
+  own.textContent = t('balance.matCustom');
+  ui.balMaterial.append(own);
+  ui.balMaterial.value = chosen;
+}
+
+function clearHeat() {
+  if (!heat) return;
+  heat.owner.group.remove(heat.mesh);
+  heat.mesh.geometry.dispose();
+  heat.owner.mesh.visible = true;
+  heat = null;
+}
+
+// Shows the painted copy in place of the object's own mesh. Clicks still land on the hidden mesh.
+function showHeat(obj, geometry) {
+  clearHeat();
+  const mesh = new THREE.Mesh(geometry, heatMat);
+  mesh.raycast = () => {};
+  obj.group.add(mesh);
+  obj.mesh.visible = false;
+  heat = { mesh, owner: obj, uuid: obj.mesh.geometry.uuid };
+}
+
+function balanceWanted() {
+  return ui.balHeat.checked || !ui.balInfo.closest('section').classList.contains('is-folded');
+}
+
+// Everything the count depends on, as one string: the model and each placed stamp.
+function balanceKeyOf(obj) {
+  const stamps = obj.stamps.map((stamp) => {
+    let shape = 0;
+    for (const contour of stamp.contours) for (const [x, y] of contour) shape += x * 1.31 + y * 0.77;
+    return [
+      stamp.id, stamp.kind, stamp.mode, stampName(stamp), stamp.height, stamp.depth, stamp.rotation,
+      stamp.offsetU, stamp.offsetV, stamp.wrap, stamp.tiltX, stamp.tiltY, shape,
+      stamp.point.x, stamp.point.y, stamp.point.z, stamp.normal.x, stamp.normal.y, stamp.normal.z,
+    ].join(',');
+  });
+  return [obj.id, obj.mesh.geometry.uuid, obj.marks.length, ui.balHeat.checked, stamps.join(';')].join('|');
+}
+
+// The faces the model is shared out between. A die has flat ones; a model without them is
+// shared between the directions of its signs, or between six sides and eight corners.
+function balanceFaces(geometry, marks) {
+  const flat = flatFaces(geometry);
+  const largest = flat.reduce((most, face) => Math.max(most, face.area), 0);
+  // A chamfer or the wall of a deep sign is flat too, but it is no face of the die.
+  const real = flat.filter((face) => face.area >= largest * 0.2);
+  if (real.length >= 4) return { faces: real, flat: true };
+  const directions = [];
+  for (const mark of marks) {
+    const normal = new THREE.Vector3().fromArray(mark.normal).normalize();
+    if (!directions.some((direction) => direction.dot(normal) > 0.98)) directions.push(normal);
+  }
+  return { faces: touchingFaces(geometry, directions.length >= 4 ? directions : roundDirections()), flat: false };
+}
+
+// Weighs the object: its volume, where its centre of mass is against the centre of its convex
+// hull, and how much of it stands behind each face. Null for a model that cannot be weighed.
+// forced: the placed stamps are counted in even when that is known to be slow.
+function measureBalance(obj, forced) {
+  const started = performance.now();
+  let geometry = obj.mesh.geometry;
+  let temporary = null;
+  let marks = obj.marks;
+  // 'none': nothing is placed; 'with': the placed stamps are counted in; 'without': they are
+  // not, the model is too dense for that; 'skipped': they are not, until the button asks.
+  let stamps = 'none';
+  if (!obj.stamps.length) {
+    obj.slowBalance = false;
+  } else if (triangleCount(geometry) > BALANCE.stamped) {
+    stamps = 'without';
+  } else if ((obj.slowBalance || obj.stamps.length > BALANCE.many) && !forced) {
+    stamps = 'skipped';
+  } else {
+    stamps = 'without';
+    try {
+      const made = stampedGeometry(obj);
+      temporary = made.geometry;
+      geometry = temporary;
+      marks = obj.marks.concat(made.marks);
+      stamps = 'with';
+    } catch {
+      // The model is then weighed as it is.
+    }
+    obj.slowBalance = performance.now() - started > BALANCE.slow;
+  }
+  try {
+    const props = massProps(geometry);
+    if (!props) return null;
+    const hull = hullGeometry(geometry);
+    const shell = massProps(hull);
+    hull.dispose();
+    // A fair die has its centre of mass in the middle of the shape it rolls on.
+    const centre = shell ? shell.centre : props.centre;
+    const { faces, flat } = balanceFaces(geometry, marks);
+    const { volumes, owner } = partsOf(geometry, centre, faces);
+
+    // How far each face is from the centre. Equal distances mean a die whose faces are alike:
+    // only for such a die does a shift of the centre of mass speak of a bias.
+    const reach = faces.map((face) => face.offset - face.normal.dot(centre));
+    const nearest = Math.min(...reach);
+    const farthest = Math.max(...reach);
+    const regular = flat && nearest > 0 && nearest / farthest > 0.97;
+    const radius = regular
+      ? reach.reduce((sum, value) => sum + value, 0) / reach.length
+      : Math.cbrt((3 * (shell ? shell.volume : props.volume)) / (4 * Math.PI));
+    const shift = props.centre.clone().sub(centre);
+    const share = shift.length() / radius;
+
+    const labels = faces.map((face) => {
+      let best = null;
+      let nearestDot = 0.98;
+      for (const mark of marks) {
+        const dot = face.normal.x * mark.normal[0] + face.normal.y * mark.normal[1] + face.normal.z * mark.normal[2];
+        if (dot > nearestDot && mark.label) {
+          nearestDot = dot;
+          best = mark.label;
+        }
+      }
+      return best;
+    });
+    const mean = props.volume / faces.length;
+    const parts = faces.map((_, i) => ({ label: labels[i], volume: volumes[i], away: volumes[i] / mean - 1, heat: 0 }));
+    // The lightest part is fully cold and the heaviest fully hot, each on its own scale: one part
+    // much heavier than the rest must not wash the differences between the others out.
+    const light = Math.max(BALANCE.floor, ...parts.map((part) => -part.away));
+    const heavyBy = Math.max(BALANCE.floor, ...parts.map((part) => part.away));
+    for (const part of parts) part.heat = part.away < 0 ? part.away / light : part.away / heavyBy;
+
+    let heavy = -1;
+    let most = 0;
+    faces.forEach((face, i) => {
+      const along = face.normal.dot(shift);
+      if (along > most) {
+        most = along;
+        heavy = i;
+      }
+    });
+
+    if (ui.balHeat.checked) showHeat(obj, heatGeometry(geometry, owner, parts.map((part) => part.heat)));
+    return {
+      volume: props.volume,
+      shift: shift.length(),
+      share,
+      regular,
+      flat,
+      level: share <= BALANCE.even ? 'even' : share <= BALANCE.slight ? 'slight' : 'strong',
+      heavy,
+      stamps,
+      parts,
+      light,
+      heavyBy,
+    };
+  } finally {
+    if (temporary) temporary.dispose();
+  }
+}
+
+function partName(part, i) {
+  return part.label ? t('balance.face', { label: part.label }) : t('balance.part', { n: i + 1 });
+}
+
+function percent(share) {
+  return formatNumber(share * 100);
+}
+
+function renderBalance() {
+  ui.balInfo.replaceChildren();
+  ui.balParts.replaceChildren();
+  const line = (text, className = '') => {
+    const p = document.createElement('p');
+    p.textContent = text;
+    p.className = className;
+    ui.balInfo.append(p);
+  };
+  const waiting = !active ? 'balance.none' : !active.solid ? 'balance.notSolid' : !balance ? 'balance.wait' : null;
+  ui.balLegend.hidden = Boolean(waiting) || !ui.balHeat.checked;
+  ui.balDetails.hidden = Boolean(waiting);
+  if (waiting) {
+    line(t(waiting));
+    return;
+  }
+  const density = densityNow();
+  line(t('balance.weight', { g: formatNumber(gramsOf(balance.volume, density)), v: formatNumber(balance.volume / 1000) }), 'is-main');
+  const shift = { mm: formatNumber(balance.shift), pct: percent(balance.share) };
+  if (balance.regular) {
+    const verdict = { even: 'balance.even', slight: 'balance.slight', strong: 'balance.strong' }[balance.level];
+    line(`${t('balance.shift', shift)} ${t(verdict)}`, balance.level === 'even' ? 'is-even' : balance.level === 'strong' ? 'is-strong' : '');
+    if (balance.level !== 'even' && balance.heavy >= 0) {
+      line(t('balance.towards', { face: partName(balance.parts[balance.heavy], balance.heavy) }));
+    }
+  } else {
+    line(t('balance.shiftRound', shift));
+  }
+  if (!balance.flat) line(t('balance.rough'));
+  if (balance.stamps === 'with') line(t('balance.withStamps'));
+  if (balance.stamps === 'without') line(t('balance.noStamps'));
+  if (balance.stamps === 'skipped') {
+    line(t('balance.slowStamps'));
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'ghost';
+    button.textContent = t('balance.count');
+    button.addEventListener('click', () => {
+      balanceForced = true;
+      balanceKey = '';
+      line(t('balance.wait'));
+      button.disabled = true;
+      scheduleBalance(30);
+    });
+    ui.balInfo.append(button);
+  }
+
+  ui.balLow.textContent = t('balance.lighter', { pct: percent(balance.light) });
+  ui.balHigh.textContent = t('balance.heavier', { pct: percent(balance.heavyBy) });
+  const tone = new THREE.Color();
+  // Numbered faces go in the order of their numbers, the rest after them as they were found.
+  const rank = (part) => {
+    const n = part.label ? Number(part.label.replace(',', '.').replace(/\.$/, '')) : NaN;
+    return Number.isFinite(n) ? n : Infinity;
+  };
+  const order = balance.parts.map((_, i) => i).sort((a, b) => {
+    const ra = rank(balance.parts[a]);
+    const rb = rank(balance.parts[b]);
+    return ra === rb ? a - b : ra < rb ? -1 : 1;
+  });
+  for (const i of order) {
+    const part = balance.parts[i];
+    const item = document.createElement('li');
+    const swatch = document.createElement('i');
+    swatch.style.background = `#${heatColor(part.heat, tone).getHexString()}`;
+    const name = document.createElement('b');
+    name.textContent = partName(part, i);
+    const grams = document.createElement('span');
+    grams.textContent = t('roll.g', { n: formatNumber(gramsOf(part.volume, density)) });
+    const away = document.createElement('span');
+    away.textContent = `${part.away > 0 ? '+' : part.away < 0 ? '−' : ''}${percent(Math.abs(part.away))} %`;
+    item.append(swatch, name, grams, away);
+    ui.balParts.append(item);
+  }
+}
+
+function runBalance() {
+  balanceTimer = 0;
+  if (busy) {
+    scheduleBalance();
+    return;
+  }
+  const obj = active;
+  if (!obj || !obj.solid || !engineReady || !balanceWanted()) {
+    balance = null;
+    balanceKey = '';
+    clearHeat();
+    renderBalance();
+    return;
+  }
+  const key = balanceKeyOf(obj);
+  if (key === balanceKey && (!ui.balHeat.checked || heat || !balance)) return;
+  balanceKey = key;
+  try {
+    balance = measureBalance(obj, balanceForced);
+  } catch {
+    balance = null;
+  }
+  balanceForced = false;
+  if (!ui.balHeat.checked || !balance) clearHeat();
+  renderBalance();
+}
+
+// Counts the balance again once the scene has been quiet for a while.
+function scheduleBalance(wait = BALANCE.wait) {
+  // A map of another object, or of a model that has changed since, would only mislead.
+  if (heat && (heat.owner !== active || heat.uuid !== heat.owner.mesh.geometry.uuid)) clearHeat();
+  clearTimeout(balanceTimer);
+  balanceTimer = setTimeout(runBalance, wait);
+}
+
 // The headings of the panel fold their sections; what is folded is remembered in the browser.
 function setupFolding() {
   let folded = [];
@@ -2306,6 +2666,9 @@ function formData() {
     scope: ui.scope.value,
     symLib: ui.symLib.value,
     symQuery: ui.symQuery.value,
+    balMaterial: ui.balMaterial.value,
+    balDensity: densityNow(),
+    balHeat: ui.balHeat.checked,
   };
 }
 
@@ -2345,6 +2708,7 @@ function saveSession() {
 }
 
 function touch() {
+  scheduleBalance();
   if (!cacheOpen) return;
   clearTimeout(saveTimer);
   saveTimer = setTimeout(saveSession, 250);
@@ -2390,6 +2754,9 @@ function applyForm(form) {
   if (['active', 'each', 'merged'].includes(form.scope)) ui.scope.value = form.scope;
   if (LIBRARIES.some((lib) => lib.id === form.symLib)) ui.symLib.value = form.symLib;
   if (typeof form.symQuery === 'string') ui.symQuery.value = form.symQuery;
+  if (form.balMaterial === 'custom' || materialById(form.balMaterial)) ui.balMaterial.value = form.balMaterial;
+  if (Number.isFinite(form.balDensity) && form.balDensity > 0) ui.balDensity.value = String(form.balDensity);
+  ui.balHeat.checked = Boolean(form.balHeat);
   // The sliders hold the sign's numbers at this point; the pad's own wait in `sizes`.
   kind = form.kind === 'svg' ? 'svg' : 'text';
   if (Number.isFinite(form.padSize) && form.padSize > 0) sizes.pad.height = form.padSize;
@@ -2768,6 +3135,8 @@ function redrawTexts() {
   ui.hint.textContent = render(live.hint);
   ui.engine.textContent = render(live.engine);
   ui.busy.querySelector('span').textContent = render(live.busy);
+  fillMaterials();
+  renderBalance();
   renderPresets();
   renderInfo();
   renderObjects();
@@ -2798,6 +3167,7 @@ function openRoll() {
     color: obj.color,
     flat: !ui.smooth.checked,
     marks: obj.marks.concat(marks),
+    ink: inkOf(geometry),
   });
   if (temporary) temporary.dispose();
 }
@@ -2869,6 +3239,30 @@ ui.color.addEventListener('input', () => {
   }
   touch();
 });
+
+ui.balMaterial.addEventListener('change', () => {
+  const made = materialById(ui.balMaterial.value);
+  if (made) ui.balDensity.value = String(made.density);
+  renderBalance();
+  touch();
+});
+
+ui.balDensity.addEventListener('input', () => {
+  // A density typed by hand is no longer that of the chosen material.
+  const made = materialById(ui.balMaterial.value);
+  if (!made || made.density !== Number(ui.balDensity.value)) ui.balMaterial.value = 'custom';
+  renderBalance();
+  touch();
+});
+
+ui.balHeat.addEventListener('change', () => {
+  if (!ui.balHeat.checked) clearHeat();
+  touch();
+  scheduleBalance(0);
+});
+
+// The balance is not counted while its section is folded; unfolding asks for it.
+ui.balInfo.closest('section').querySelector('.fold').addEventListener('click', () => scheduleBalance(0));
 
 ui.smooth.addEventListener('change', () => {
   for (const obj of objects) {
@@ -3163,6 +3557,7 @@ const enginePromise = initManifold()
     engineReady = true;
     setEngine(fontReady ? 'engine.readyFont' : 'engine.ready');
     syncButtons();
+    scheduleBalance();
   })
   .catch((error) => {
     setEngine('engine.failed');

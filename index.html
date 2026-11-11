@@ -12,7 +12,7 @@
       document.documentElement.dataset.theme = themes.indexOf(saved) >= 0 ? saved : 'midnight';
     })();
   </script>
-  <link rel="stylesheet" href="./styles.css?v=10">
+  <link rel="stylesheet" href="./styles.css?v=11">
   <script type="importmap">
   {
     "imports": {
@@ -109,6 +109,28 @@
             <button id="btn-fit" type="button" class="ghost" data-i18n="model.fit" disabled>Вписать в кадр</button>
             <button id="btn-regen" type="button" data-i18n="model.regen" hidden>Изменить форму…</button>
           </div>
+        </section>
+
+        <section>
+          <h2><button type="button" class="fold" aria-expanded="true"><span data-i18n="balance.title">Вес и баланс</span></button></h2>
+          <div class="bal-material">
+            <label class="field"><span data-i18n="balance.material">Материал</span>
+              <select id="bal-material"></select>
+            </label>
+            <label class="field"><span data-i18n="balance.density">Плотность, г/см³</span>
+              <input id="bal-density" type="number" min="0.05" max="25" step="0.01" value="1.18">
+            </label>
+          </div>
+          <div id="bal-info" class="bal-info"></div>
+          <label class="check"><input id="bal-heat" type="checkbox"> <span data-i18n="balance.heat">Тепловая карта веса частей</span></label>
+          <div id="bal-legend" class="bal-legend" hidden>
+            <span id="bal-low"></span><i></i><span id="bal-high"></span>
+          </div>
+          <details id="bal-details" class="more" hidden>
+            <summary data-i18n="balance.parts">Части по граням</summary>
+            <ul id="bal-parts" class="bal-parts"></ul>
+          </details>
+          <p class="muted" data-i18n="balance.note">Вес считается по объёму модели: единицы модели приняты за миллиметры, тело — сплошным. Часть грани — всё, что лежит между центром и этой гранью; знаки, вырезанные в грани, делают её часть легче. Дайс-трей бросает куб с тем же центром масс.</p>
         </section>
 
         <section>
@@ -299,7 +321,19 @@
           <button id="roll-tower" type="button" data-i18n="roll.tower">Через башню</button>
         </div>
       </div>
-      <p class="muted roll-note" data-i18n="roll.note">Кубы сталкиваются по выпуклой оболочке модели. Вес не меняет притяжение, поэтому он показан иначе: тяжёлый куб летит медленнее и меньше скачет. Выпавшее читается по знаку, который смотрит вверх.</p>
+      <div class="roll-options">
+        <label><span data-i18n="roll.material">Материал</span>
+          <select id="roll-material"></select>
+        </label>
+        <label><input id="roll-ink" type="checkbox"> <span data-i18n="roll.ink">Красить знаки</span></label>
+        <label><span data-i18n="roll.inkColor">Краска</span>
+          <input id="roll-ink-color" type="color" value="#1d1612">
+        </label>
+      </div>
+      <details class="more roll-note">
+        <summary data-i18n="roll.help">Как устроен трей</summary>
+        <p class="muted" data-i18n="roll.note">Кубы сталкиваются по выпуклой оболочке модели. Вес не меняет притяжение, поэтому он показан иначе: тяжёлый куб летит медленнее и меньше скачет. Выпавшее читается по знаку, который смотрит вверх.</p>
+      </details>
     </div>
   </div>
 
@@ -347,7 +381,7 @@
     </div>
   </div>
 
-  <script type="module" src="./app.js?v=10"></script>
+  <script type="module" src="./app.js?v=11"></script>
   <script>
     setTimeout(function () {
       if (window.__diceApp) return;

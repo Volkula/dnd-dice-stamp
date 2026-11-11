@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { AppError } from './i18n.js?v=10';
+import { AppError } from './i18n.js?v=11';
 
 export const PROJECT_APP = 'dnd-dice-stamp';
 // Version 2 holds several objects; version 1 files with a single model still open.
@@ -36,7 +36,11 @@ export function packGeometry(geometry) {
   const source = geometry.getIndex();
   const index = new Uint32Array(source ? source.count : position.count);
   for (let i = 0; i < index.length; i++) index[i] = source ? source.getX(i) : i;
-  return { positions, index };
+  const packed = { positions, index };
+  // One flag per triangle: the surface of a sign, which the tray may paint.
+  const ink = geometry.userData && geometry.userData.ink;
+  if (ink instanceof Uint8Array && ink.length === index.length / 3) packed.ink = ink.slice();
+  return packed;
 }
 
 export function unpackGeometry(packed) {
@@ -55,11 +59,14 @@ export function unpackGeometry(packed) {
   geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
   geometry.setIndex(new THREE.BufferAttribute(index, 1));
   geometry.computeVertexNormals();
+  if (packed.ink instanceof Uint8Array && packed.ink.length === index.length / 3) geometry.userData = { ink: packed.ink };
   return geometry;
 }
 
 export function encodeGeometry(packed) {
-  return { positions: toBase64(packed.positions), index: toBase64(packed.index) };
+  const encoded = { positions: toBase64(packed.positions), index: toBase64(packed.index) };
+  if (packed.ink) encoded.ink = toBase64(packed.ink);
+  return encoded;
 }
 
 export function decodeGeometry(encoded) {
@@ -75,7 +82,15 @@ export function decodeGeometry(encoded) {
     throw new AppError('err.projectBroken');
   }
   if (positions.byteLength % 4 || index.byteLength % 4) throw new AppError('err.projectBroken');
-  return { positions: new Float32Array(positions), index: new Uint32Array(index) };
+  const decoded = { positions: new Float32Array(positions), index: new Uint32Array(index) };
+  if (typeof encoded.ink === 'string') {
+    try {
+      decoded.ink = new Uint8Array(fromBase64(encoded.ink));
+    } catch {
+      // The model opens without its painted signs.
+    }
+  }
+  return decoded;
 }
 
 const round = (n) => Math.round(n * 1e5) / 1e5;
