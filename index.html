@@ -12,7 +12,7 @@
       document.documentElement.dataset.theme = themes.indexOf(saved) >= 0 ? saved : 'midnight';
     })();
   </script>
-  <link rel="stylesheet" href="./styles.css?v=9">
+  <link rel="stylesheet" href="./styles.css?v=10">
   <script type="importmap">
   {
     "imports": {
@@ -66,7 +66,7 @@
 
       <aside class="panel">
         <section>
-          <h2 data-i18n="project.title">Проект</h2>
+          <h2><button type="button" class="fold" aria-expanded="true"><span data-i18n="project.title">Проект</span></button></h2>
           <div class="row">
             <label class="file">
               <input id="file-project" type="file" accept=".json,application/json">
@@ -79,7 +79,7 @@
         </section>
 
         <section>
-          <h2 data-i18n="scene.title">Сцена</h2>
+          <h2><button type="button" class="fold" aria-expanded="true"><span data-i18n="scene.title">Сцена</span></button></h2>
           <div class="row">
             <label class="file">
               <input id="file-stl" type="file" accept=".stl,model/stl">
@@ -93,7 +93,7 @@
         </section>
 
         <section>
-          <h2 data-i18n="model.title">Объект</h2>
+          <h2><button type="button" class="fold" aria-expanded="true"><span data-i18n="model.title">Объект</span></button></h2>
           <label class="field"><span data-i18n="model.name">Название</span>
             <input id="obj-name" type="text" spellcheck="false" autocomplete="off" disabled>
           </label>
@@ -112,12 +112,13 @@
         </section>
 
         <section>
-          <h2 data-i18n="sign.title">Знак</h2>
+          <h2><button type="button" class="fold" aria-expanded="true"><span data-i18n="sign.title">Знак</span></button></h2>
           <p id="edit-note" class="muted"></p>
           <div class="tabs" role="tablist">
             <button id="tab-text" type="button" class="tab is-on" role="tab" aria-selected="true" data-i18n="sign.tabText">Текст</button>
             <button id="tab-svg" type="button" class="tab" role="tab" aria-selected="false">SVG</button>
             <button id="tab-symbols" type="button" class="tab" role="tab" aria-selected="false" data-i18n="sign.tabSymbols">Символы</button>
+            <button id="tab-pad" type="button" class="tab" role="tab" aria-selected="false" data-i18n="sign.tabPad">Площадка</button>
           </div>
 
           <div id="pane-text">
@@ -171,15 +172,37 @@
             <p id="sym-credit" class="muted"></p>
             <p id="sym-now" class="muted"></p>
           </div>
+
+          <div id="pane-pad" hidden>
+            <label class="field"><span data-i18n="sign.padShape">Контур среза</span>
+              <select id="pad-shape">
+                <option value="plane" data-i18n="sign.padPlane">Вся плоскость</option>
+                <option value="circle" data-i18n="sign.padCircle">Круг</option>
+                <option value="triangle" data-i18n="sign.padTriangle">Треугольник</option>
+                <option value="square" data-i18n="sign.padSquare">Квадрат</option>
+                <option value="pentagon" data-i18n="sign.padPentagon">Пятиугольник</option>
+                <option value="hexagon" data-i18n="sign.padHexagon">Шестиугольник</option>
+              </select>
+            </label>
+            <div class="offsets">
+              <label><span data-i18n="sign.padTiltX">Наклон плоскости X, °</span>
+                <input id="pad-tilt-x" type="number" min="-85" max="85" step="1" value="0">
+              </label>
+              <label><span>Y, °</span>
+                <input id="pad-tilt-y" type="number" min="-85" max="85" step="1" value="0">
+              </label>
+            </div>
+            <p class="muted" data-i18n="sign.padNote">Площадка — плоский срез, из которого получается грань.</p>
+          </div>
         </section>
 
         <section>
-          <h2 data-i18n="how.title">Как нанести</h2>
-          <div class="modes">
+          <h2><button type="button" class="fold" aria-expanded="true"><span data-i18n="how.title">Как нанести</span></button></h2>
+          <div id="modes" class="modes">
             <button id="mode-cut" type="button" class="mode is-on" data-i18n="how.cut">Вдавить</button>
             <button id="mode-raise" type="button" class="mode" data-i18n="how.raise">Поднять</button>
           </div>
-          <label class="slider"><span data-i18n="how.height">Высота знака</span>
+          <label class="slider"><span id="height-label" data-i18n="how.height">Высота знака</span>
             <span class="pair">
               <input id="height" type="range" min="0.4" max="40" step="0.1" value="6">
               <input id="height-num" type="number" min="0.2" max="200" step="0.1" value="6">
@@ -205,14 +228,14 @@
               <input id="off-v" type="number" step="0.1" value="0">
             </label>
           </div>
-          <label class="check"><input id="wrap" type="checkbox" checked> <span data-i18n="how.wrap">По рельефу</span></label>
-          <p class="muted" data-i18n="how.wrapNote">Знак повторяет поверхность под собой: на неровной модели он везде одной глубины и не тонет в буграх. Без галочки знак плоский.</p>
+          <label id="wrap-row" class="check"><input id="wrap" type="checkbox" checked> <span data-i18n="how.wrap">По рельефу</span></label>
+          <p id="wrap-note" class="muted" data-i18n="how.wrapNote">Знак повторяет поверхность под собой: на неровной модели он везде одной глубины и не тонет в буграх. Без галочки знак плоский.</p>
           <p class="muted" data-i18n="how.note">Клик по модели ставит новый штамп. Поставленный штамп тянется мышью: он скользит по поверхности и ложится по её наклону. Знак, размер и поворот правятся у выбранного штампа. Esc снимает выбор.</p>
         </section>
 
         <section>
           <div class="section-head">
-            <h2 data-i18n="stamps.title">Штампы</h2>
+            <h2><button type="button" class="fold" aria-expanded="true"><span data-i18n="stamps.title">Штампы</span></button></h2>
             <button id="btn-deselect" type="button" class="text" data-i18n="stamps.deselect" hidden>Снять выбор</button>
           </div>
           <ul id="stamps" class="stamps"></ul>
@@ -224,7 +247,7 @@
         </section>
 
         <section>
-          <h2 data-i18n="export.title">Экспорт</h2>
+          <h2><button type="button" class="fold" aria-expanded="true"><span data-i18n="export.title">Экспорт</span></button></h2>
           <label class="check"><input id="auto" type="checkbox" checked> <span data-i18n="export.auto">Автообработка</span></label>
           <p class="muted" data-i18n="export.autoNote">Перед записью файла наносит все поставленные штампы, сваривает сетку, проверяет, что тело цельное, и разворачивает нормали наружу. Без галочки файл пишется как есть, без неприменённых штампов.</p>
           <div class="row">
@@ -267,6 +290,9 @@
         </label>
         <label class="slider"><span><span data-i18n="roll.weight">Вес</span>: <output id="roll-weight-out"></output></span>
           <input id="roll-weight" type="range" step="1">
+        </label>
+        <label class="slider"><span><span data-i18n="roll.speed">Скорость</span>: <output id="roll-speed-out"></output></span>
+          <input id="roll-speed" type="range" step="0.25">
         </label>
         <div class="roll-buttons">
           <button id="roll-throw" type="button" class="primary" data-i18n="roll.throw">Бросить</button>
@@ -321,7 +347,7 @@
     </div>
   </div>
 
-  <script type="module" src="./app.js?v=9"></script>
+  <script type="module" src="./app.js?v=10"></script>
   <script>
     setTimeout(function () {
       if (window.__diceApp) return;

@@ -4,10 +4,11 @@
 
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
-import { t } from './i18n.js?v=9';
+import { t } from './i18n.js?v=10';
 
 const RAPIER_URL = 'https://cdn.jsdelivr.net/npm/@dimforge/rapier3d-compat@0.14.0/rapier.es.js';
 const STEP = 1 / 240;
+// Steps of physics in one frame at the usual speed. A faster throw is allowed as many times more.
 const MAX_STEPS_PER_FRAME = 12;
 // How stiff a contact is. The engine's own 30 Hz is tuned for metres: under a gravity of 981 a
 // die at rest sinks a quarter of a millimetre into the felt, and that is as much as parts two
@@ -45,6 +46,8 @@ const LIMITS = {
   count: [1, 12, 2],
   size: [8, 40, 16],
   weight: [1, 60, 5],
+  // How fast the throw is played: under 1 is slow motion, over 1 is a hurry.
+  speed: [0.25, 3, 1],
 };
 
 let rapierLoading = null;
@@ -82,6 +85,7 @@ function readSettings() {
     count: Math.round(clampSetting('count', saved.count)),
     size: clampSetting('size', saved.size),
     weight: clampSetting('weight', saved.weight),
+    speed: Math.round(clampSetting('speed', saved.speed) * 4) / 4,
   };
 }
 
@@ -252,9 +256,11 @@ export function createRoller() {
     count: $('roll-count'),
     size: $('roll-size'),
     weight: $('roll-weight'),
+    speed: $('roll-speed'),
     countOut: $('roll-count-out'),
     sizeOut: $('roll-size-out'),
     weightOut: $('roll-weight-out'),
+    speedOut: $('roll-speed-out'),
   };
 
   const settings = readSettings();
@@ -416,6 +422,7 @@ export function createRoller() {
     ui.countOut.textContent = String(settings.count);
     ui.sizeOut.textContent = t('roll.mm', { n: settings.size });
     ui.weightOut.textContent = t('roll.g', { n: settings.weight });
+    ui.speedOut.textContent = `×${settings.speed}`;
   }
 
   function showResult() {
@@ -901,8 +908,12 @@ export function createRoller() {
     const dt = Math.min((now - last) / 1000, 0.05);
     last = now;
     if (world && !resting) {
-      carry += dt;
-      elapsed += dt;
+      // The chosen speed plays the flight and the roll. A die in the hand follows the pointer as it is.
+      const pace = held ? 1 : settings.speed;
+      const span = dt * pace;
+      const most = Math.ceil(MAX_STEPS_PER_FRAME * Math.max(1, pace));
+      carry += span;
+      elapsed += span;
       for (const die of dice) {
         if (die.started || elapsed < die.startAt) continue;
         die.started = true;
@@ -911,12 +922,12 @@ export function createRoller() {
       }
       if (held) carryHeld();
       let steps = 0;
-      while (carry >= STEP && steps < MAX_STEPS_PER_FRAME) {
+      while (carry >= STEP && steps < most) {
         world.step();
         carry -= STEP;
         steps += 1;
       }
-      if (steps === MAX_STEPS_PER_FRAME) carry = 0;
+      if (steps === most) carry = 0;
       syncMeshes();
       // Round dice (a coin on its rim, a cylinder) would roll about the tray for a long time:
       // nothing in the model stands for rolling resistance, so the damping grows instead.
@@ -927,7 +938,7 @@ export function createRoller() {
           die.body.setAngularDamping(2.5);
         }
       }
-      quiet = quietNow() ? quiet + dt : 0;
+      quiet = quietNow() ? quiet + span : 0;
       // The engine puts bodies to sleep about two seconds after they stop; the reading need not wait for that.
       const asleep = !held && (elapsed > TIMEOUT[way] || dice.every((die) => die.started && die.body.isSleeping()));
       if (phase === 'rolling') {
@@ -1002,7 +1013,8 @@ export function createRoller() {
     ui.root.hidden = true;
   }
 
-  function bindSlider(input, name) {
+  // rethrow: the setting changes the dice themselves, so they are thrown anew.
+  function bindSlider(input, name, rethrow = true) {
     input.min = String(LIMITS[name][0]);
     input.max = String(LIMITS[name][1]);
     input.value = String(settings[name]);
@@ -1018,13 +1030,15 @@ export function createRoller() {
         // Settings then last for this visit only.
       }
       // The dice go the way they went last time, except that a hand does not throw by itself.
-      throwDice(way === 'tower' ? 'tower' : 'tray');
+      if (rethrow) throwDice(way === 'tower' ? 'tower' : 'tray');
     });
   }
 
   bindSlider(ui.count, 'count');
   bindSlider(ui.size, 'size');
   bindSlider(ui.weight, 'weight');
+  // The speed takes hold at once, in the middle of a throw too.
+  bindSlider(ui.speed, 'speed', false);
   showOutputs();
   ui.again.addEventListener('click', () => throwDice('tray'));
   ui.tower.addEventListener('click', () => throwDice('tower'));

@@ -3,16 +3,17 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { STLLoader } from 'three/addons/loaders/STLLoader.js';
 import { STLExporter } from 'three/addons/exporters/STLExporter.js';
 import { MeshBVH } from 'three-mesh-bvh';
-import { artworkFromSvg, fitContours } from './geom2d.js?v=9';
+import { artworkFromSvg, fitContours } from './geom2d.js?v=10';
 import {
   initManifold,
   localToolGeometry,
+  padPreview,
   prepareSolid,
   applyStamps,
   flipWinding,
   signedVolume,
   manifoldApi,
-} from './stamp.js?v=9';
+} from './stamp.js?v=10';
 import {
   LANGS,
   AppError,
@@ -25,8 +26,8 @@ import {
   onLangChange,
   applyI18n,
   locale,
-} from './i18n.js?v=9';
-import { cacheGet, cacheSet, cacheDel } from './store.js?v=9';
+} from './i18n.js?v=10';
+import { cacheGet, cacheSet, cacheDel } from './store.js?v=10';
 import {
   DEFAULT_FONT,
   EMOJI_CSS_FAMILY,
@@ -42,11 +43,11 @@ import {
   customFonts,
   needsEmoji,
   layoutText,
-} from './fonts.js?v=9';
-import { LIBRARIES, library, loadLibrary, searchItems } from './symbols.js?v=9';
-import { createRoller } from './roll.js?v=9';
-import { buildDie, fitHeight, shapeById, optionsFor, SHAPES } from './dicegen.js?v=9';
-import { createGenerator } from './genui.js?v=9';
+} from './fonts.js?v=10';
+import { LIBRARIES, library, loadLibrary, searchItems } from './symbols.js?v=10';
+import { createRoller } from './roll.js?v=10';
+import { buildDie, fitHeight, shapeById, optionsFor, SHAPES } from './dicegen.js?v=10';
+import { createGenerator } from './genui.js?v=10';
 import {
   PROJECT_APP,
   PROJECT_VERSION,
@@ -59,10 +60,11 @@ import {
   decodeGeometry,
   stampToData,
   stampFromData,
-} from './project.js?v=9';
+} from './project.js?v=10';
 
 const THEMES = ['midnight', 'day', 'contrast', 'sepia'];
 const THEME_KEY = 'dice.theme';
+const FOLD_KEY = 'dice.folded';
 const HISTORY_LIMIT = 8;
 const EMOJI_LIMIT = 240;
 const ICON_LIMIT = 120;
@@ -85,6 +87,18 @@ const PRESETS = [
     svg: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><polygon points="50,8 94,88 6,88"/></svg>',
   },
 ];
+
+// A pad is a flat cut that makes a face. Its outline: how many corners (a circle is drawn with
+// many), and the name shown for it. The whole plane has no outline at all.
+const PAD_SHAPES = {
+  plane: { corners: 4, key: 'sign.padPlane' },
+  circle: { corners: 72, key: 'sign.padCircle' },
+  triangle: { corners: 3, key: 'sign.padTriangle' },
+  square: { corners: 4, key: 'sign.padSquare' },
+  pentagon: { corners: 5, key: 'sign.padPentagon' },
+  hexagon: { corners: 6, key: 'sign.padHexagon' },
+};
+const PAD_TILT = 85;
 
 const $ = (id) => document.getElementById(id);
 
@@ -117,9 +131,18 @@ const ui = {
   tabText: $('tab-text'),
   tabSvg: $('tab-svg'),
   tabSymbols: $('tab-symbols'),
+  tabPad: $('tab-pad'),
   paneText: $('pane-text'),
   paneSvg: $('pane-svg'),
   paneSymbols: $('pane-symbols'),
+  panePad: $('pane-pad'),
+  padShape: $('pad-shape'),
+  padTiltX: $('pad-tilt-x'),
+  padTiltY: $('pad-tilt-y'),
+  modes: $('modes'),
+  heightLabel: $('height-label'),
+  wrapRow: $('wrap-row'),
+  wrapNote: $('wrap-note'),
   text: $('text'),
   font: $('font'),
   fontRemove: $('btn-font-remove'),
@@ -219,6 +242,16 @@ const raiseMatOn = raiseMat.clone();
 raiseMatOn.opacity = 0.92;
 raiseMatOn.emissive.set(0x7a5512);
 
+// The face a pad leaves behind, seen through the piece it takes off.
+const floorMat = new THREE.MeshBasicMaterial({
+  color: 0xf6efe2,
+  transparent: true,
+  opacity: 0.55,
+  side: THREE.DoubleSide,
+  depthTest: false,
+  depthWrite: false,
+});
+
 function previewMaterial(obj, stamp) {
   const on = obj === active && stamp.id === obj.selectedId;
   if (stamp.mode === 'raise') return on ? raiseMatOn : raiseMat;
@@ -241,10 +274,12 @@ scene.add(ring);
 
 let engineReady = false;
 let fontReady = false;
-// What the next click stamps: 'text' reads the text field, 'svg' the SVG field.
+// What the next click stamps: 'text' reads the text field, 'svg' the SVG field, 'pad' cuts a flat face.
 let kind = 'text';
-// Which tab is open. The symbol picker is a third tab that feeds one of the two fields.
+// Which tab is open. The symbol picker is a tab that feeds one of the two sign fields.
 let pane = 'text';
+// The sign tabs and the pad tab share the size and depth sliders; each side remembers its own numbers.
+const sizes = { sign: { height: 6, depth: 0.6 }, pad: { height: 12, depth: 1 } };
 let svgLabel = '';
 let mode = 'cut';
 let formLock = false;
@@ -355,7 +390,7 @@ function syncButtons() {
   ui.fontRemove.disabled = !hasFont(ui.font.value) || ui.font.value === DEFAULT_FONT;
   const selected = selectedStamp();
   ui.deselect.hidden = !selected;
-  ui.editNote.textContent = t(selected ? 'sign.noteEditing' : 'sign.noteNext');
+  ui.editNote.textContent = t(selected ? 'sign.noteEditing' : kind === 'pad' ? 'sign.notePad' : 'sign.noteNext');
   ui.symNow.textContent = t('sym.now', { what: signSummary() });
 }
 
@@ -560,6 +595,7 @@ function clearStamps(obj) {
   obj.refits.clear();
   for (const mesh of obj.previews.values()) {
     obj.group.remove(mesh);
+    setFloor(mesh, null);
     mesh.geometry.dispose();
   }
   obj.previews.clear();
@@ -586,8 +622,26 @@ function disposeObject(obj) {
 // otherwise a numbered die bristles with thirty of them.
 function paintPreview(obj, stamp, mesh) {
   mesh.material = previewMaterial(obj, stamp);
+  const on = obj === active && stamp.id === obj.selectedId;
   const arrow = mesh.children[0];
-  if (arrow) arrow.visible = obj === active && stamp.id === obj.selectedId;
+  if (arrow) arrow.visible = on;
+  if (mesh.userData.floor) mesh.userData.floor.visible = on;
+}
+
+// The pale face shown under a pad's preview. Null takes it away.
+function setFloor(mesh, geometry) {
+  const old = mesh.userData.floor;
+  if (old) {
+    mesh.remove(old);
+    old.geometry.dispose();
+    mesh.userData.floor = null;
+  }
+  if (!geometry) return;
+  const floor = new THREE.Mesh(geometry, floorMat);
+  floor.raycast = () => {};
+  floor.renderOrder = 5;
+  mesh.add(floor);
+  mesh.userData.floor = floor;
 }
 
 function refreshPreviews(obj) {
@@ -694,7 +748,7 @@ function removeObject(obj) {
 
 function copyStamp(stamp) {
   const copy = stampFromData(stampToData(stamp));
-  Object.assign(copy, shapeFor(copy.sourceContours, copy.height));
+  Object.assign(copy, shapeOf(copy));
   return copy;
 }
 
@@ -816,6 +870,15 @@ function placementMatrix(stamp) {
   const pos = stamp.point.clone()
     .addScaledVector(x, stamp.offsetU || 0)
     .addScaledVector(y, stamp.offsetV || 0);
+  if (stamp.tiltX || stamp.tiltY) {
+    // A pad may lean off the surface it stands on: that is how an edge or a corner is cut away.
+    const lean = new THREE.Quaternion().setFromAxisAngle(x, THREE.MathUtils.degToRad(stamp.tiltX || 0));
+    y.applyQuaternion(lean);
+    z.applyQuaternion(lean);
+    lean.setFromAxisAngle(y, THREE.MathUtils.degToRad(stamp.tiltY || 0));
+    x.applyQuaternion(lean);
+    z.applyQuaternion(lean);
+  }
   const matrix = new THREE.Matrix4().makeBasis(x, y, z);
   matrix.setPosition(pos);
   return matrix;
@@ -893,8 +956,47 @@ function settledNormal(obj, stamp, hit) {
   return sum.dot(z) > 0.5 ? sum : hit.normal;
 }
 
-function stampJobs(obj) {
-  return obj.stamps.map((stamp) => ({
+const isPad = (stamp) => stamp.kind === 'pad';
+
+// The outline of a pad: a regular polygon around a circle of the given diameter, one side down.
+function padOutline(source, size) {
+  const { corners } = PAD_SHAPES[source] || PAD_SHAPES.plane;
+  const round = source === 'circle';
+  const radius = round ? size / 2 : size / 2 / Math.cos(Math.PI / corners);
+  const start = round ? 0 : -Math.PI / 2 + Math.PI / corners;
+  const contour = [];
+  for (let i = 0; i < corners; i++) {
+    const angle = start + (i / corners) * Math.PI * 2;
+    contour.push([radius * Math.cos(angle), radius * Math.sin(angle)]);
+  }
+  return [contour];
+}
+
+// A pad's tool stands this far over its plane and, for the whole plane, this far to the sides:
+// further than any part of the model can be from a point of its surface.
+function reachOf(obj) {
+  const geometry = obj.mesh.geometry;
+  if (!geometry.boundingBox) geometry.computeBoundingBox();
+  return geometry.boundingBox.getSize(new THREE.Vector3()).length() * 1.05 + 1;
+}
+
+function padJob(obj, stamp) {
+  const reach = reachOf(obj);
+  return {
+    contours: stamp.source === 'plane'
+      ? [[[-reach, -reach], [reach, -reach], [reach, reach], [-reach, reach]]]
+      : stamp.contours,
+    fillRule: 'NonZero',
+    depth: stamp.depth,
+    mode: 'cut',
+    matrix: Array.from(placementMatrix(stamp).elements),
+    surface: null,
+    reach,
+  };
+}
+
+function stampJobs(obj, stamps = obj.stamps) {
+  return stamps.map((stamp) => (isPad(stamp) ? padJob(obj, stamp) : {
     contours: stamp.contours,
     fillRule: stamp.fillRule,
     depth: stamp.depth,
@@ -902,6 +1004,76 @@ function stampJobs(obj) {
     matrix: Array.from(placementMatrix(stamp).elements),
     surface: stamp.wrap ? surfaceUnder(obj, stamp) : null,
   }));
+}
+
+// Sets a sign that stood over a pad down on the face the pad has cut. The object's mesh is
+// already the one with the pads applied. Signs that still touch their surface stay as they are.
+function setOnPad(obj, stamp, planes) {
+  const matrix = placementMatrix(stamp);
+  const x = new THREE.Vector3();
+  const y = new THREE.Vector3();
+  const z = new THREE.Vector3();
+  matrix.extractBasis(x, y, z);
+  const lift = 0.01;
+  probeRay.origin.setFromMatrixPosition(matrix).addScaledVector(z, lift);
+  probeRay.direction.copy(z).negate();
+  const hit = reliefOf(obj).raycastFirst(probeRay, THREE.FrontSide);
+  if (!hit || hit.distance < lift * 2) return;
+  const off = new THREE.Vector3();
+  const plane = planes.find((entry) => (
+    hit.face.normal.dot(entry.normal) > 0.999
+    && Math.abs(off.subVectors(hit.point, entry.point).dot(entry.normal)) < entry.slack
+  ));
+  if (!plane) return;
+  // The sign keeps looking the way it did, as far as the new face allows.
+  stamp.rotation = rotationFor(plane.normal, y);
+  stamp.point.copy(hit.point);
+  stamp.offsetU = 0;
+  stamp.offsetV = 0;
+  stamp.normal.copy(plane.normal);
+}
+
+// The model with every placed stamp applied, and the marks its signs leave for the tray.
+// Pads go first: they change the surface, and a sign standing over a pad is set down on its face.
+function stampedGeometry(obj) {
+  const pads = obj.stamps.filter(isPad);
+  const signs = obj.stamps.filter((stamp) => !isPad(stamp));
+  const before = obj.mesh.geometry;
+  if (!pads.length || !signs.length) {
+    return { geometry: applyStamps(before, stampJobs(obj)), marks: signs.map(markOf) };
+  }
+  const cut = applyStamps(before, stampJobs(obj, pads));
+  const slack = Math.max(2e-3, reachOf(obj) * 5e-5);
+  const planes = pads.map((pad) => {
+    const matrix = placementMatrix(pad);
+    const normal = new THREE.Vector3().setFromMatrixColumn(matrix, 2);
+    const point = new THREE.Vector3().setFromMatrixPosition(matrix).addScaledVector(normal, -pad.depth);
+    return { normal, point, slack };
+  });
+  // The signs are moved only for this calculation: after an undo they stand where they were put.
+  const kept = signs.map((stamp) => ({
+    stamp,
+    point: stamp.point.clone(),
+    normal: stamp.normal.clone(),
+    rotation: stamp.rotation,
+    offsetU: stamp.offsetU,
+    offsetV: stamp.offsetV,
+  }));
+  const relief = obj.relief;
+  obj.mesh.geometry = cut;
+  try {
+    for (const stamp of signs) setOnPad(obj, stamp, planes);
+    return { geometry: applyStamps(cut, stampJobs(obj, signs)), marks: signs.map(markOf) };
+  } finally {
+    obj.mesh.geometry = before;
+    obj.relief = relief;
+    cut.dispose();
+    for (const { stamp, point, normal, rotation, offsetU, offsetV } of kept) {
+      stamp.point.copy(point);
+      stamp.normal.copy(normal);
+      Object.assign(stamp, { rotation, offsetU, offsetV });
+    }
+  }
 }
 
 function positionPreview(obj, stamp) {
@@ -920,9 +1092,18 @@ function positionPreview(obj, stamp) {
 
 function rebuildPreview(obj, stamp) {
   let geometry;
+  let floor = null;
   try {
-    const surface = stamp.wrap ? surfaceUnder(obj, stamp) : null;
-    geometry = localToolGeometry(stamp.contours, stamp.fillRule, stamp.depth, stamp.mode, surface);
+    if (isPad(stamp)) {
+      // A pad shows the piece it takes off the model and the face it leaves.
+      const made = padPreview(obj.mesh.geometry, padJob(obj, stamp));
+      floor = made.floor;
+      // A pad that takes nothing off is drawn as a thin plate, so it can still be seen and moved.
+      geometry = made.piece || localToolGeometry(stamp.contours, 'NonZero', stamp.depth, 'cut');
+    } else {
+      const surface = stamp.wrap ? surfaceUnder(obj, stamp) : null;
+      geometry = localToolGeometry(stamp.contours, stamp.fillRule, stamp.depth, stamp.mode, surface);
+    }
   } catch (error) {
     setStatus(errorMsg(error, 'err.stampBuild'));
     return;
@@ -939,13 +1120,22 @@ function rebuildPreview(obj, stamp) {
     mesh.geometry.dispose();
     mesh.geometry = geometry;
   }
+  setFloor(mesh, floor);
   paintPreview(obj, stamp, mesh);
   positionPreview(obj, stamp);
 }
 
-// Fitted contours are centred on the origin, so the footprint is symmetric.
+// The stamp's outline at its size. A pad draws its own; a sign is fitted to its height.
+function shapeOf(stamp) {
+  return isPad(stamp) ? footprint(padOutline(stamp.source, stamp.height)) : shapeFor(stamp.sourceContours, stamp.height);
+}
+
 function shapeFor(sourceContours, height) {
-  const contours = fitContours(sourceContours, height);
+  return footprint(fitContours(sourceContours, height));
+}
+
+// The contours are centred on the origin, so the footprint is symmetric.
+function footprint(contours) {
   let halfWidth = 0;
   let halfHeight = 0;
   for (const contour of contours) {
@@ -962,10 +1152,10 @@ function scheduleRebuild(obj, stamp) {
   obj.timers.set(stamp.id, setTimeout(() => rebuildPreview(obj, stamp), 40));
 }
 
-// A sign that follows the relief changes shape as it moves. During a drag it is rebuilt
-// a few times a second rather than on every pointer event.
+// A sign that follows the relief changes shape as it moves, and so does the piece a pad takes off.
+// During a drag they are rebuilt a few times a second rather than on every pointer event.
 function refitSoon(obj, stamp) {
-  if (!stamp.wrap || obj.refits.has(stamp.id)) return;
+  if (!(stamp.wrap || isPad(stamp)) || obj.refits.has(stamp.id)) return;
   obj.refits.set(
     stamp.id,
     setTimeout(() => {
@@ -976,11 +1166,16 @@ function refitSoon(obj, stamp) {
 }
 
 function stampName(stamp) {
+  if (isPad(stamp)) return t((PAD_SHAPES[stamp.source] || PAD_SHAPES.plane).key);
   const raw = stamp.kind === 'text' ? stamp.source : stamp.label || 'SVG';
   return raw.replace(/\s+/g, ' ').trim().slice(0, 24) || '—';
 }
 
 function stampLabel(stamp) {
+  if (isPad(stamp)) {
+    const what = stamp.source === 'plane' ? stampName(stamp) : `${stampName(stamp)} ${stamp.height}`;
+    return t('stamps.pad', { what, depth: stamp.depth });
+  }
   return t('stamps.item', {
     what: stampName(stamp),
     how: t(stamp.mode === 'raise' ? 'how.raiseShort' : 'how.cutShort'),
@@ -1032,24 +1227,32 @@ function deselect() {
 // Loads the stamp's sign and numbers into the form. The symbol tab stays open if the user is in it.
 function showStampInForm(stamp) {
   formLock = true;
-  kind = stamp.kind;
-  if (stamp.kind === 'text') {
+  const pad = isPad(stamp);
+  switchKind(stamp.kind);
+  if (pad) {
+    ui.padShape.value = stamp.source;
+    ui.padTiltX.value = String(stamp.tiltX || 0);
+    ui.padTiltY.value = String(stamp.tiltY || 0);
+  } else if (stamp.kind === 'text') {
     ui.text.value = stamp.source;
     if (hasFont(stamp.fontId)) ui.font.value = stamp.fontId;
   } else {
     ui.svg.value = stamp.source;
     svgLabel = stamp.label || '';
   }
-  if (pane !== 'symbols') showPane(stamp.kind);
-  mode = stamp.mode;
-  ui.modeCut.classList.toggle('is-on', mode === 'cut');
-  ui.modeRaise.classList.toggle('is-on', mode === 'raise');
+  if (pane !== 'symbols' || pad) showPane(stamp.kind);
+  if (!pad) {
+    mode = stamp.mode;
+    ui.modeCut.classList.toggle('is-on', mode === 'cut');
+    ui.modeRaise.classList.toggle('is-on', mode === 'raise');
+    ui.wrap.checked = Boolean(stamp.wrap);
+  }
   setPair(ui.height, ui.heightNum, stamp.height);
   setPair(ui.depth, ui.depthNum, stamp.depth);
   setPair(ui.rotation, ui.rotationNum, stamp.rotation);
   ui.offU.value = String(stamp.offsetU);
   ui.offV.value = String(stamp.offsetV);
-  ui.wrap.checked = Boolean(stamp.wrap);
+  syncPadForm();
   formLock = false;
 }
 
@@ -1073,6 +1276,7 @@ function removeStamp(id) {
   const mesh = obj.previews.get(id);
   if (mesh) {
     obj.group.remove(mesh);
+    setFloor(mesh, null);
     mesh.geometry.dispose();
     obj.previews.delete(id);
   }
@@ -1111,14 +1315,28 @@ function missingMessage(artwork) {
     : null;
 }
 
+function tiltOf(input) {
+  return Math.min(PAD_TILT, Math.max(-PAD_TILT, num(input)));
+}
+
+function padShapeNow() {
+  return ui.padShape.value in PAD_SHAPES ? ui.padShape.value : 'plane';
+}
+
 async function placeStamp(hit) {
   const obj = hit.object;
   const height = Math.max(0.05, num(ui.height));
+  const pad = kind === 'pad';
   let artwork;
   let shape;
   try {
-    artwork = await readArtwork();
-    shape = shapeFor(artwork.contours, height);
+    if (pad) {
+      artwork = { kind: 'pad', source: padShapeNow(), label: '', fontId: '', contours: [], fillRule: 'NonZero' };
+      shape = footprint(padOutline(artwork.source, height));
+    } else {
+      artwork = await readArtwork();
+      shape = shapeFor(artwork.contours, height);
+    }
   } catch (error) {
     setStatus(errorMsg(error));
     return;
@@ -1133,17 +1351,20 @@ async function placeStamp(hit) {
     sourceContours: artwork.contours,
     ...shape,
     fillRule: artwork.fillRule,
-    mode,
+    mode: pad ? 'cut' : mode,
     height,
     depth: Math.max(0.02, num(ui.depth)),
     rotation: 0,
     offsetU: 0,
     offsetV: 0,
-    wrap: ui.wrap.checked,
+    wrap: !pad && ui.wrap.checked,
+    tiltX: pad ? tiltOf(ui.padTiltX) : 0,
+    tiltY: pad ? tiltOf(ui.padTiltY) : 0,
     point: hit.point.clone(),
     normal: hit.normal.clone(),
   };
-  if (stamp.wrap) stamp.normal.copy(settledNormal(obj, stamp, hit));
+  // On a rough surface a pad, like a sign that follows the relief, takes the surface's average direction.
+  if (stamp.wrap || pad) stamp.normal.copy(settledNormal(obj, stamp, hit));
   obj.stamps.push(stamp);
   obj.selectedId = stamp.id;
   rebuildPreview(obj, stamp);
@@ -1155,14 +1376,14 @@ async function placeStamp(hit) {
     formLock = false;
     renderList();
   }
-  setStatus(missingMessage(artwork) || msg('status.placed'));
+  setStatus(missingMessage(artwork) || msg(pad ? 'status.padPlaced' : 'status.placed'));
   touch();
 }
 
 // Sits the stamp on the surface under the hit and tilts it to that face.
 function seatStamp(obj, stamp, hit) {
   stamp.point.copy(hit.point);
-  stamp.normal.copy(stamp.wrap ? settledNormal(obj, stamp, hit) : hit.normal);
+  stamp.normal.copy(stamp.wrap || isPad(stamp) ? settledNormal(obj, stamp, hit) : hit.normal);
   positionPreview(obj, stamp);
   refitSoon(obj, stamp);
 }
@@ -1192,7 +1413,8 @@ function scheduleSourceEdit() {
 async function applySourceEdit() {
   const obj = active;
   const stamp = selectedStamp();
-  if (!stamp) return false;
+  // A pad has no sign to rebuild.
+  if (!stamp || isPad(stamp)) return false;
   let artwork;
   let shape;
   try {
@@ -1232,7 +1454,7 @@ async function signChosen(label) {
 function useSvg(text, label) {
   ui.svg.value = text;
   svgLabel = label;
-  kind = 'svg';
+  switchKind('svg');
   if (pane !== 'symbols') showPane('svg');
   signChosen(label);
 }
@@ -1244,19 +1466,26 @@ function onGeomInput() {
   if (!stamp) return;
   const nextHeight = Math.max(0.05, num(ui.height));
   const nextDepth = Math.max(0.02, num(ui.depth));
-  const wrap = ui.wrap.checked;
+  const pad = isPad(stamp);
+  const wrap = !pad && ui.wrap.checked;
   // A sign that follows the relief is rebuilt on any change: a turn or a shift puts it over other bumps.
-  const shape = nextHeight !== stamp.height || nextDepth !== stamp.depth || mode !== stamp.mode || wrap || stamp.wrap;
+  // So is a pad: it shows the piece it takes off, and that changes with every move.
+  const shape = pad || nextHeight !== stamp.height || nextDepth !== stamp.depth || mode !== stamp.mode || wrap || stamp.wrap;
   stamp.height = nextHeight;
   stamp.depth = nextDepth;
-  stamp.mode = mode;
+  stamp.mode = pad ? 'cut' : mode;
   stamp.wrap = wrap;
   stamp.rotation = num(ui.rotation);
   stamp.offsetU = num(ui.offU);
   stamp.offsetV = num(ui.offV);
+  if (pad) {
+    stamp.source = padShapeNow();
+    stamp.tiltX = tiltOf(ui.padTiltX);
+    stamp.tiltY = tiltOf(ui.padTiltY);
+  }
   if (shape) {
     try {
-      Object.assign(stamp, shapeFor(stamp.sourceContours, stamp.height));
+      Object.assign(stamp, shapeOf(stamp));
     } catch (error) {
       setStatus(errorMsg(error));
       return;
@@ -1301,16 +1530,26 @@ function stampUnder(obj, point) {
   let best = null;
   let bestDistance = Infinity;
   for (const stamp of obj.stamps) {
+    const flat = isPad(stamp);
+    // A pad is grabbed only while it is the selected stamp: otherwise a click on it is a click
+    // on the model, and puts a sign on the future face.
+    if (flat && stamp.id !== obj.selectedId) continue;
     local.copy(point).applyMatrix4(placementMatrix(stamp).invert());
     const pad = stamp.height * 0.15;
     if (Math.abs(local.x) > stamp.halfWidth + pad) continue;
     if (Math.abs(local.y) > stamp.halfHeight + pad) continue;
-    // A sign that follows the relief lies well off its own plane wherever the surface bends.
-    const off = stamp.wrap
-      ? Math.max(stamp.halfWidth, stamp.halfHeight) + stamp.depth
-      : Math.max(stamp.height * 0.35, stamp.depth * 1.5);
-    if (Math.abs(local.z) > off) continue;
-    const distance = Math.hypot(local.x, local.y);
+    if (flat) {
+      // Everything over the pad's plane is the piece it takes off.
+      if (local.z < -stamp.depth * 1.5 - 0.1) continue;
+    } else {
+      // A sign that follows the relief lies well off its own plane wherever the surface bends.
+      const off = stamp.wrap
+        ? Math.max(stamp.halfWidth, stamp.halfHeight) + stamp.depth
+        : Math.max(stamp.height * 0.35, stamp.depth * 1.5);
+      if (Math.abs(local.z) > off) continue;
+    }
+    // A sign standing on the pad is nearer to the hand than the pad itself.
+    const distance = Math.hypot(local.x, local.y) + (flat ? 1e6 : 0);
     if (distance < bestDistance) {
       best = stamp;
       bestDistance = distance;
@@ -1340,10 +1579,11 @@ async function bake(obj = active) {
   setBusy(true, 'busy.baking', { n: obj.stamps.length });
   await nextPaint();
   try {
-    const next = applyStamps(obj.mesh.geometry, stampJobs(obj));
+    const made = stampedGeometry(obj);
+    const next = made.geometry;
     obj.history.push({ geometry: obj.mesh.geometry, marks: obj.marks.length, stamps: obj.stamps.slice() });
     if (obj.history.length > HISTORY_LIMIT) obj.history.shift().geometry.dispose();
-    obj.marks = obj.marks.concat(obj.stamps.map(markOf));
+    obj.marks = obj.marks.concat(made.marks);
     obj.mesh.geometry = next;
     obj.stats = measure(next);
     obj.edited = true;
@@ -1378,7 +1618,7 @@ function undo() {
   obj.stamps = previous.stamps.concat(placedSince);
   for (const stamp of previous.stamps) rebuildPreview(obj, stamp);
   // The relief under the later stamps has changed too.
-  for (const stamp of placedSince) if (stamp.wrap) rebuildPreview(obj, stamp);
+  for (const stamp of placedSince) if (stamp.wrap || isPad(stamp)) rebuildPreview(obj, stamp);
   layout();
   renderList();
   renderInfo();
@@ -1769,7 +2009,12 @@ async function exportStl() {
 
 function showPane(next) {
   pane = next;
-  const tabs = [[ui.tabText, ui.paneText, 'text'], [ui.tabSvg, ui.paneSvg, 'svg'], [ui.tabSymbols, ui.paneSymbols, 'symbols']];
+  const tabs = [
+    [ui.tabText, ui.paneText, 'text'],
+    [ui.tabSvg, ui.paneSvg, 'svg'],
+    [ui.tabSymbols, ui.paneSymbols, 'symbols'],
+    [ui.tabPad, ui.panePad, 'pad'],
+  ];
   for (const [tab, box, name] of tabs) {
     tab.classList.toggle('is-on', name === next);
     tab.setAttribute('aria-selected', String(name === next));
@@ -1780,12 +2025,88 @@ function showPane(next) {
 function setPane(next) {
   showPane(next);
   if (next === 'symbols') {
+    // The symbols feed a sign field, never a pad.
+    if (kind === 'pad') switchKind('text');
     if (symbols.phase === 'idle') loadSymbols();
   } else {
-    kind = next;
+    switchKind(next);
   }
   syncButtons();
   touch();
+}
+
+// Changes what the next click stamps. Going between a sign and a pad swaps the numbers in the
+// shared size and depth sliders, and lets go of a selected stamp of the other sort: a pad
+// cannot turn into a sign.
+function switchKind(next) {
+  const was = kind === 'pad';
+  const now = next === 'pad';
+  kind = next;
+  if (was !== now) {
+    const locked = formLock;
+    const from = was ? sizes.pad : sizes.sign;
+    from.height = num(ui.height);
+    from.depth = num(ui.depth);
+    const to = now ? sizes.pad : sizes.sign;
+    formLock = true;
+    setPair(ui.height, ui.heightNum, to.height);
+    setPair(ui.depth, ui.depthNum, to.depth);
+    formLock = locked;
+    const selected = selectedStamp();
+    if (selected && isPad(selected) !== now) {
+      active.selectedId = null;
+      renderList();
+    }
+  }
+  syncPadForm();
+}
+
+// A pad is always a flat cut: the cut-or-raise choice and the relief do not apply to it,
+// and the whole plane has no size.
+function syncPadForm() {
+  const pad = kind === 'pad';
+  ui.modes.hidden = pad;
+  ui.wrapRow.hidden = pad;
+  ui.wrapNote.hidden = pad;
+  const label = pad ? 'how.padSize' : 'how.height';
+  ui.heightLabel.dataset.i18n = label;
+  ui.heightLabel.textContent = t(label);
+  const whole = pad && padShapeNow() === 'plane';
+  ui.height.disabled = whole;
+  ui.heightNum.disabled = whole;
+}
+
+// The headings of the panel fold their sections; what is folded is remembered in the browser.
+function setupFolding() {
+  let folded = [];
+  try {
+    const saved = JSON.parse(localStorage.getItem(FOLD_KEY) || '[]');
+    if (Array.isArray(saved)) folded = saved;
+  } catch {
+    folded = [];
+  }
+  const sections = [];
+  const save = () => {
+    try {
+      localStorage.setItem(FOLD_KEY, JSON.stringify(sections.filter(([, section]) => section.classList.contains('is-folded')).map(([name]) => name)));
+    } catch {
+      // Private mode: the sections then stay folded for this visit only.
+    }
+  };
+  for (const toggle of document.querySelectorAll('.panel .fold')) {
+    const section = toggle.closest('section');
+    const name = toggle.querySelector('[data-i18n]').dataset.i18n.split('.')[0];
+    sections.push([name, section]);
+    const set = (on) => {
+      section.classList.toggle('is-folded', on);
+      toggle.setAttribute('aria-expanded', String(!on));
+    };
+    set(folded.includes(name));
+    toggle.addEventListener('click', () => {
+      set(!section.classList.contains('is-folded'));
+      save();
+    });
+  }
 }
 
 function setMode(next) {
@@ -1926,13 +2247,13 @@ function renderSymbols() {
 function pickSymbol(lib, item) {
   if (lib.type === 'emoji') {
     ui.text.value = item.char;
-    kind = 'text';
+    switchKind('text');
     signChosen(`${item.char} ${item.label}`);
     return;
   }
   ui.svg.value = item.svg;
   svgLabel = item.label;
-  kind = 'svg';
+  switchKind('svg');
   signChosen(`${item.label} (${lib.name})`);
 }
 
@@ -1971,8 +2292,13 @@ function formData() {
     svgLabel,
     fontId: ui.font.value,
     mode,
-    height: num(ui.height),
-    depth: num(ui.depth),
+    height: kind === 'pad' ? sizes.sign.height : num(ui.height),
+    depth: kind === 'pad' ? sizes.sign.depth : num(ui.depth),
+    padSize: kind === 'pad' ? num(ui.height) : sizes.pad.height,
+    padDepth: kind === 'pad' ? num(ui.depth) : sizes.pad.depth,
+    padShape: padShapeNow(),
+    padTiltX: tiltOf(ui.padTiltX),
+    padTiltY: tiltOf(ui.padTiltY),
     wrap: ui.wrap.checked,
     color: ui.color.value,
     smooth: ui.smooth.checked,
@@ -2064,9 +2390,17 @@ function applyForm(form) {
   if (['active', 'each', 'merged'].includes(form.scope)) ui.scope.value = form.scope;
   if (LIBRARIES.some((lib) => lib.id === form.symLib)) ui.symLib.value = form.symLib;
   if (typeof form.symQuery === 'string') ui.symQuery.value = form.symQuery;
+  // The sliders hold the sign's numbers at this point; the pad's own wait in `sizes`.
   kind = form.kind === 'svg' ? 'svg' : 'text';
+  if (Number.isFinite(form.padSize) && form.padSize > 0) sizes.pad.height = form.padSize;
+  if (Number.isFinite(form.padDepth) && form.padDepth > 0) sizes.pad.depth = form.padDepth;
+  if (form.padShape in PAD_SHAPES) ui.padShape.value = form.padShape;
+  ui.padTiltX.value = String(Number.isFinite(form.padTiltX) ? form.padTiltX : 0);
+  ui.padTiltY.value = String(Number.isFinite(form.padTiltY) ? form.padTiltY : 0);
   formLock = false;
-  const nextPane = ['text', 'svg', 'symbols'].includes(form.pane) ? form.pane : kind;
+  if (form.kind === 'pad') switchKind('pad');
+  else syncPadForm();
+  const nextPane = kind === 'pad' ? 'pad' : ['text', 'svg', 'symbols'].includes(form.pane) ? form.pane : kind;
   showPane(nextPane);
   symbols.phase = 'idle';
   symbols.items = [];
@@ -2146,7 +2480,8 @@ function applyScene(data) {
     for (const saved of Array.isArray(meta.stamps) ? meta.stamps : []) {
       try {
         const stamp = stampFromData(saved);
-        Object.assign(stamp, shapeFor(stamp.sourceContours, stamp.height));
+        if (isPad(stamp) && !(stamp.source in PAD_SHAPES)) stamp.source = 'plane';
+        Object.assign(stamp, shapeOf(stamp));
         while (used.has(stamp.id)) stamp.id += 1;
         used.add(stamp.id);
         obj.stamps.push(stamp);
@@ -2447,10 +2782,13 @@ function openRoll() {
   if (!obj || busy) return;
   let geometry = obj.mesh.geometry;
   let temporary = null;
+  let marks = obj.stamps.filter((stamp) => !isPad(stamp)).map(markOf);
   if (obj.stamps.length && obj.solid && engineReady) {
     try {
-      temporary = applyStamps(obj.mesh.geometry, stampJobs(obj));
+      const made = stampedGeometry(obj);
+      temporary = made.geometry;
       geometry = temporary;
+      marks = made.marks;
     } catch {
       // The tray then shows the die without the signs that are not applied yet.
     }
@@ -2459,7 +2797,7 @@ function openRoll() {
     geometry,
     color: obj.color,
     flat: !ui.smooth.checked,
-    marks: obj.marks.concat(obj.stamps.map(markOf)),
+    marks: obj.marks.concat(marks),
   });
   if (temporary) temporary.dispose();
 }
@@ -2557,6 +2895,14 @@ ui.fitAll.addEventListener('click', fitScene);
 ui.tabText.addEventListener('click', () => setPane('text'));
 ui.tabSvg.addEventListener('click', () => setPane('svg'));
 ui.tabSymbols.addEventListener('click', () => setPane('symbols'));
+ui.tabPad.addEventListener('click', () => setPane('pad'));
+ui.padShape.addEventListener('change', () => {
+  syncPadForm();
+  onGeomInput();
+  touch();
+});
+ui.padTiltX.addEventListener('input', onGeomInput);
+ui.padTiltY.addEventListener('input', onGeomInput);
 ui.modeCut.addEventListener('click', () => setMode('cut'));
 ui.modeRaise.addEventListener('click', () => setMode('raise'));
 ui.deselect.addEventListener('click', deselect);
@@ -2790,6 +3136,7 @@ for (const lib of LIBRARIES) {
   ui.symLib.append(option);
 }
 
+setupFolding();
 applyI18n();
 applyTheme(document.documentElement.dataset.theme);
 redrawTexts();

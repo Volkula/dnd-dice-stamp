@@ -247,6 +247,42 @@ a { color: var(--accent); }
 }
 
 .section-head { display: flex; justify-content: space-between; align-items: center; }
+.section-head h2 { flex: 1; }
+
+/* The heading of a panel section folds it: only the heading stays. */
+.panel .fold {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  padding: 2px 0;
+  font: inherit;
+  letter-spacing: inherit;
+  text-transform: inherit;
+  text-align: left;
+  color: inherit;
+}
+
+.panel .fold::before {
+  content: '';
+  flex: none;
+  width: 6px;
+  height: 6px;
+  margin: 0 2px 2px;
+  border-right: 2px solid currentColor;
+  border-bottom: 2px solid currentColor;
+  transform: rotate(45deg);
+  transition: transform 0.12s;
+}
+
+.panel .fold:hover { color: var(--text); }
+.panel section.is-folded .fold::before { margin: 0 3px 0 1px; transform: rotate(-45deg); }
+.panel section.is-folded { padding: 9px 0; }
+.panel section.is-folded > :not(h2):not(.section-head),
+.panel section.is-folded > .section-head > :not(h2) { display: none; }
 
 .muted { color: var(--muted); font-size: 13px; margin: 8px 0 0; }
 .muted:empty { display: none; }
@@ -457,7 +493,7 @@ input[type="checkbox"] { accent-color: var(--accent); width: 16px; height: 16px;
 
 .roll-controls {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr)) auto;
+  grid-template-columns: repeat(4, minmax(0, 1fr)) auto;
   gap: 14px;
   align-items: end;
   padding: 10px 14px 0;

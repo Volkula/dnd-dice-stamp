@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { mergeVertices } from 'three/addons/utils/BufferGeometryUtils.js';
 import Module from 'manifold-3d';
-import { AppError } from './i18n.js?v=9';
+import { AppError } from './i18n.js?v=10';
 
 const WASM = 'https://cdn.jsdelivr.net/npm/manifold-3d@3.5.4/manifold.wasm';
 
@@ -44,12 +44,13 @@ function sectionFrom(contours, fillRule) {
   return cs;
 }
 
-function extrudeLocal(contours, fillRule, depth, mode) {
+// reach: a pad takes off everything over its plane, so its tool stands that far above it.
+function extrudeLocal(contours, fillRule, depth, mode, reach = 0) {
   const cs = sectionFrom(contours, fillRule);
   let solid = null;
   let shifted = null;
   try {
-    const { height, z0 } = zShift(depth, mode);
+    const { height, z0 } = reach > 0 ? { height: depth + reach, z0: -depth } : zShift(depth, mode);
     solid = cs.extrude(height);
     shifted = solid.translate(0, 0, z0);
     return shifted;
@@ -186,9 +187,9 @@ function wrapLocal(contours, fillRule, depth, mode, surface, shell) {
   }
 }
 
-function toolFor(contours, fillRule, depth, mode, surface, shell) {
+function toolFor(contours, fillRule, depth, mode, surface, shell, reach = 0) {
   const wrapped = surface ? wrapLocal(contours, fillRule, depth, mode, surface, shell) : null;
-  return wrapped || extrudeLocal(contours, fillRule, depth, mode);
+  return wrapped || extrudeLocal(contours, fillRule, depth, mode, reach);
 }
 
 // The stamp as it is drawn over the model before it is applied.
@@ -199,6 +200,73 @@ export function localToolGeometry(contours, fillRule, depth, mode, surface = nul
     return meshToGeometry(solid.getMesh());
   } finally {
     solid.delete();
+  }
+}
+
+// The model as a solid, kept from one call to the next: a pad dragged over the model asks for
+// its preview many times a second, and welding a dense mesh anew each time would stutter.
+let kept = null;
+
+function solidOf(geometry) {
+  const position = geometry.getAttribute('position');
+  if (kept && kept.geometry === geometry && kept.position === position && kept.version === position.version) {
+    return kept.solid;
+  }
+  if (kept) {
+    kept.solid.delete();
+    kept = null;
+  }
+  const solid = geometryToManifold(geometry);
+  const status = solid.status();
+  if (status !== 'NoError') {
+    solid.delete();
+    throw statusError(status);
+  }
+  kept = { geometry, position, version: position.version, solid };
+  return solid;
+}
+
+// What a pad takes off the model, in the pad's own frame: the piece that goes and the flat face
+// left under it. Both are null where the pad's tool misses the model.
+export function padPreview(geometry, job) {
+  if (!api) throw new AppError('err.engineNotReady');
+  const made = [];
+  try {
+    const tool = extrudeLocal(job.contours, job.fillRule, job.depth, 'cut', job.reach);
+    made.push(tool);
+    const placed = tool.transform(job.matrix);
+    made.push(placed);
+    const taken = solidOf(geometry).intersect(placed);
+    made.push(taken);
+    if (taken.isEmpty()) return { piece: null, floor: null };
+    const back = new THREE.Matrix4().fromArray(job.matrix).invert();
+    const local = taken.transform(Array.from(back.elements));
+    made.push(local);
+    const piece = meshToGeometry(local.getMesh());
+
+    // The floor is every triangle of the piece that lies in the cutting plane.
+    const position = piece.getAttribute('position');
+    const index = piece.getIndex();
+    const tolerance = Math.max(1e-3, job.reach * 2e-5);
+    const level = (i) => Math.abs(position.getZ(i) + job.depth) < tolerance;
+    const flat = [];
+    for (let i = 0; i < index.count; i += 3) {
+      const a = index.getX(i);
+      const b = index.getX(i + 1);
+      const c = index.getX(i + 2);
+      if (!level(a) || !level(b) || !level(c)) continue;
+      // Turned over, so the face looks up out of the cut.
+      for (const corner of [a, c, b]) flat.push(position.getX(corner), position.getY(corner), -job.depth);
+    }
+    let floor = null;
+    if (flat.length) {
+      floor = new THREE.BufferGeometry();
+      floor.setAttribute('position', new THREE.Float32BufferAttribute(flat, 3));
+      floor.computeVertexNormals();
+    }
+    return { piece, floor };
+  } finally {
+    for (const solid of made) solid.delete();
   }
 }
 
@@ -339,7 +407,7 @@ export function applyStamps(geometry, jobs) {
 
     jobs.forEach((job, index) => {
       try {
-        const tool = track(toolFor(job.contours, job.fillRule, job.depth, job.mode, job.surface, false));
+        const tool = track(toolFor(job.contours, job.fillRule, job.depth, job.mode, job.surface, false, job.reach));
         const world = track(tool.transform(job.matrix));
         const next = track(job.mode === 'raise' ? current.add(world) : current.subtract(world));
         const status = next.status();

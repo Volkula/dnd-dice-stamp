@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { AppError } from './i18n.js?v=9';
+import { AppError } from './i18n.js?v=10';
 
 export const PROJECT_APP = 'dnd-dice-stamp';
 // Version 2 holds several objects; version 1 files with a single model still open.
@@ -89,6 +89,8 @@ export function stampToData(stamp) {
     fontId: stamp.fontId || '',
     sourceContours: stamp.sourceContours.map((contour) => contour.map(([x, y]) => [round(x), round(y)])),
     fillRule: stamp.fillRule,
+    tiltX: stamp.tiltX || 0,
+    tiltY: stamp.tiltY || 0,
     mode: stamp.mode,
     height: stamp.height,
     depth: stamp.depth,
@@ -115,22 +117,28 @@ function vector(value) {
 
 // Returns a stamp without the fitted shape: the caller scales the contours to the height.
 export function stampFromData(data) {
-  if (!data || !Array.isArray(data.sourceContours)) throw new AppError('err.projectBroken');
-  const sourceContours = data.sourceContours
-    .filter((contour) => Array.isArray(contour) && contour.length >= 3)
-    .map((contour) => contour.map((p) => [finite(p && p[0], 0), finite(p && p[1], 0)]));
-  if (!sourceContours.length) throw new AppError('err.projectBroken');
+  if (!data) throw new AppError('err.projectBroken');
+  // A pad is a flat cut that makes a face: its outline is one of a few named shapes, kept in `source`.
+  const pad = data.kind === 'pad';
+  if (!pad && !Array.isArray(data.sourceContours)) throw new AppError('err.projectBroken');
+  const sourceContours = pad
+    ? []
+    : data.sourceContours
+      .filter((contour) => Array.isArray(contour) && contour.length >= 3)
+      .map((contour) => contour.map((p) => [finite(p && p[0], 0), finite(p && p[1], 0)]));
+  if (!pad && !sourceContours.length) throw new AppError('err.projectBroken');
+  const tilt = (value) => Math.min(85, Math.max(-85, finite(value, 0)));
   const normal = vector(data.normal);
   if (normal.lengthSq() < 1e-12) throw new AppError('err.projectBroken');
   return {
     id: Math.max(1, Math.floor(finite(data.id, 1))),
-    kind: data.kind === 'svg' ? 'svg' : 'text',
+    kind: pad ? 'pad' : data.kind === 'svg' ? 'svg' : 'text',
     source: String(data.source ?? ''),
     label: String(data.label ?? ''),
     fontId: String(data.fontId ?? ''),
     sourceContours,
-    fillRule: data.fillRule === 'EvenOdd' ? 'EvenOdd' : 'NonZero',
-    mode: data.mode === 'raise' ? 'raise' : 'cut',
+    fillRule: data.fillRule === 'EvenOdd' && !pad ? 'EvenOdd' : 'NonZero',
+    mode: data.mode === 'raise' && !pad ? 'raise' : 'cut',
     height: Math.max(0.05, finite(data.height, 6)),
     depth: Math.max(0.02, finite(data.depth, 0.6)),
     rotation: finite(data.rotation, 0),
@@ -138,7 +146,9 @@ export function stampFromData(data) {
     offsetV: finite(data.offsetV, 0),
     // Stamps saved before signs could follow the relief get it too: on a flat face nothing
     // changes, and on a rough one the sign stops sinking into the bumps.
-    wrap: data.wrap !== false,
+    wrap: data.wrap !== false && !pad,
+    tiltX: pad ? tilt(data.tiltX) : 0,
+    tiltY: pad ? tilt(data.tiltY) : 0,
     point: vector(data.point),
     normal: normal.normalize(),
   };
