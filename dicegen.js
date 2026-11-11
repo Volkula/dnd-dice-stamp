@@ -11,11 +11,49 @@ const BLOCK = 400;
 export const MIN_OUTCOMES = 2;
 export const MAX_OUTCOMES = 120;
 
-// kind: 'poly' lands on any face, 'roll' lies on its side (ends carry no number),
-// 'ends' is a prism whose two ends count as faces too.
-// least: the fewest faces the shape looks right with. themed: a decorative shape, not a fair one.
-// round: a ball-like body cut the way the plain polyhedron is. awkward: a figure for show that
-// seldom comes to rest with a number up. lopsided: the sides have no opposite ones.
+// Settings of a single shape, shown as extra rows in the generator.
+// range: a slider, a multiplier of the usual size unless said otherwise. choice: a list.
+// check: a tick. count: a whole number. when: the row only matters while another option has that value.
+// shows: what the row prints next to its name instead of the multiplier.
+const scale = (id, labelKey, min, max) => ({ id, type: 'range', labelKey, min, max, step: 0.05, initial: 1 });
+const choice = (id, labelKey, values) => ({ id, type: 'choice', labelKey, initial: values[0].id, values });
+const HILT = [
+  scale('gripLength', 'gen.opt.gripLength', 0.6, 1.8),
+  scale('gripWidth', 'gen.opt.gripWidth', 0.6, 1.6),
+  scale('guardWidth', 'gen.opt.guardWidth', 0.85, 1.6),
+  scale('guardThick', 'gen.opt.guardThick', 0.5, 2.5),
+];
+// Two bands of numbers: the same numbers on both, or a different set on each.
+const NUMBERS = [
+  choice('numbers', 'gen.opt.numbers', [
+    { id: 'same', key: 'gen.opt.numbers.same' },
+    { id: 'split', key: 'gen.opt.numbers.split' },
+  ]),
+  // The share of the facets the smaller band gets.
+  { id: 'share', type: 'range', labelKey: 'gen.opt.share', min: 0.25, max: 0.5, step: 0.05, initial: 0.4, shows: 'split', when: { numbers: 'split' } },
+];
+const POTION = [
+  scale('body', 'gen.opt.body', 0.5, 2),
+  choice('neck', 'gen.opt.neck', [
+    { id: 'faceted', key: 'gen.opt.neck.faceted' },
+    { id: 'round', key: 'gen.opt.neck.round' },
+  ]),
+  choice('stopper', 'gen.opt.stopper', [
+    { id: 'cork', key: 'gen.opt.stopper.cork' },
+    { id: 'ball', key: 'gen.opt.stopper.ball' },
+    { id: 'crystal', key: 'gen.opt.stopper.crystal' },
+    { id: 'none', key: 'gen.opt.stopper.none' },
+  ]),
+];
+const SCROLL = [
+  scale('rod', 'gen.opt.rod', 0.6, 2),
+  choice('finial', 'gen.opt.finial', [
+    { id: 'knob', key: 'gen.opt.finial.knob' },
+    { id: 'cone', key: 'gen.opt.finial.cone' },
+    { id: 'ball', key: 'gen.opt.finial.ball' },
+  ]),
+];
+
 export const GROUPS = [
   { id: 'plain', nameKey: 'gen.group.plain' },
   { id: 'weapons', nameKey: 'gen.group.weapons' },
@@ -24,24 +62,30 @@ export const GROUPS = [
   { id: 'things', nameKey: 'gen.group.things' },
 ];
 
+// kind: 'poly' lands on any face, 'roll' lies on its side (ends carry no number),
+// 'ends' is a prism whose two ends count as faces too.
+// least: the fewest faces the shape looks right with. themed: a decorative shape, not a fair one.
+// round: a ball-like body cut the way the plain polyhedron is. awkward: a figure for show that
+// seldom comes to rest with a number up. lopsided: the sides have no opposite ones.
+// options: the settings only this shape has.
 export const SHAPES = [
   { id: 'sphere', group: 'plain', nameKey: 'gen.shape.sphere', shortKey: 'gen.short.sphere', kind: 'poly', stretch: false, caps: false },
   { id: 'spindle', group: 'plain', nameKey: 'gen.shape.spindle', shortKey: 'gen.short.spindle', kind: 'poly', stretch: true, caps: false },
   { id: 'cylinder', group: 'plain', nameKey: 'gen.shape.cylinder', shortKey: 'gen.short.cylinder', kind: 'roll', least: 3, stretch: true, caps: true },
   { id: 'prism', group: 'plain', nameKey: 'gen.shape.prism', shortKey: 'gen.short.prism', kind: 'ends', stretch: true, caps: false },
 
-  { id: 'sword', group: 'weapons', nameKey: 'gen.shape.sword', shortKey: 'gen.short.sword', kind: 'roll', least: 3, themed: true },
-  { id: 'dagger', group: 'weapons', nameKey: 'gen.shape.dagger', shortKey: 'gen.short.dagger', kind: 'roll', least: 3, themed: true },
-  { id: 'mace', group: 'weapons', nameKey: 'gen.shape.mace', shortKey: 'gen.short.mace', kind: 'roll', least: 4, themed: true },
-  { id: 'morningstar', group: 'weapons', nameKey: 'gen.shape.morningstar', shortKey: 'gen.short.morningstar', kind: 'poly', round: true, themed: true },
-  { id: 'spear', group: 'weapons', nameKey: 'gen.shape.spear', shortKey: 'gen.short.spear', kind: 'roll', least: 3, themed: true },
-  { id: 'axe', group: 'weapons', nameKey: 'gen.shape.axe', shortKey: 'gen.short.axe', kind: 'roll', least: 4, themed: true, awkward: true },
-  { id: 'hammer', group: 'weapons', nameKey: 'gen.shape.hammer', shortKey: 'gen.short.hammer', kind: 'roll', least: 4, themed: true, awkward: true },
+  { id: 'sword', group: 'weapons', nameKey: 'gen.shape.sword', shortKey: 'gen.short.sword', kind: 'roll', least: 3, themed: true, options: HILT },
+  { id: 'dagger', group: 'weapons', nameKey: 'gen.shape.dagger', shortKey: 'gen.short.dagger', kind: 'roll', least: 3, themed: true, options: HILT },
+  { id: 'mace', group: 'weapons', nameKey: 'gen.shape.mace', shortKey: 'gen.short.mace', kind: 'roll', least: 4, themed: true, options: [scale('fins', 'gen.opt.flanges', 0, 1.8)] },
+  { id: 'morningstar', group: 'weapons', nameKey: 'gen.shape.morningstar', shortKey: 'gen.short.morningstar', kind: 'poly', round: true, themed: true, options: [scale('fins', 'gen.opt.spikes', 0.4, 1.8)] },
+  { id: 'spear', group: 'weapons', nameKey: 'gen.shape.spear', shortKey: 'gen.short.spear', kind: 'roll', least: 3, themed: true, options: [scale('shaft', 'gen.opt.shaft', 0.6, 1.5)] },
+  { id: 'axe', group: 'weapons', nameKey: 'gen.shape.axe', shortKey: 'gen.short.axe', kind: 'roll', least: 4, themed: true, awkward: true, options: [scale('fins', 'gen.opt.blade', 0.6, 1.4)] },
+  { id: 'hammer', group: 'weapons', nameKey: 'gen.shape.hammer', shortKey: 'gen.short.hammer', kind: 'roll', least: 4, themed: true, awkward: true, options: NUMBERS },
   { id: 'staff', group: 'weapons', nameKey: 'gen.shape.staff', shortKey: 'gen.short.staff', kind: 'roll', least: 4, themed: true },
   { id: 'wand', group: 'weapons', nameKey: 'gen.shape.wand', shortKey: 'gen.short.wand', kind: 'roll', least: 3, themed: true },
   { id: 'torch', group: 'weapons', nameKey: 'gen.shape.torch', shortKey: 'gen.short.torch', kind: 'roll', least: 4, themed: true },
   { id: 'shield', group: 'weapons', nameKey: 'gen.shape.shield', shortKey: 'gen.short.shield', kind: 'ends', stretch: true, themed: true, lopsided: true },
-  { id: 'shuriken', group: 'weapons', nameKey: 'gen.shape.shuriken', shortKey: 'gen.short.shuriken', kind: 'ends', stretch: true, themed: true },
+  { id: 'shuriken', group: 'weapons', nameKey: 'gen.shape.shuriken', shortKey: 'gen.short.shuriken', kind: 'ends', stretch: true, themed: true, options: [scale('fins', 'gen.opt.blades', 0.6, 1.5)] },
   { id: 'cannon', group: 'weapons', nameKey: 'gen.shape.cannon', shortKey: 'gen.short.cannon', kind: 'roll', least: 5, themed: true },
   { id: 'bomb', group: 'weapons', nameKey: 'gen.shape.bomb', shortKey: 'gen.short.bomb', kind: 'poly', round: true, themed: true },
 
@@ -49,7 +93,7 @@ export const SHAPES = [
   { id: 'djembe', group: 'music', nameKey: 'gen.shape.djembe', shortKey: 'gen.short.djembe', kind: 'roll', least: 5, themed: true },
   { id: 'tambourine', group: 'music', nameKey: 'gen.shape.tambourine', shortKey: 'gen.short.tambourine', kind: 'ends', stretch: true, themed: true },
   { id: 'gong', group: 'music', nameKey: 'gen.shape.gong', shortKey: 'gen.short.gong', kind: 'ends', stretch: true, themed: true },
-  { id: 'bell', group: 'music', nameKey: 'gen.shape.bell', shortKey: 'gen.short.bell', kind: 'roll', least: 5, themed: true },
+  { id: 'bell', group: 'music', nameKey: 'gen.shape.bell', shortKey: 'gen.short.bell', kind: 'roll', least: 5, themed: true, options: [{ id: 'clapper', type: 'check', labelKey: 'gen.opt.clapper', initial: true }] },
   { id: 'flute', group: 'music', nameKey: 'gen.shape.flute', shortKey: 'gen.short.flute', kind: 'roll', least: 5, themed: true },
   { id: 'fanfare', group: 'music', nameKey: 'gen.shape.fanfare', shortKey: 'gen.short.fanfare', kind: 'roll', least: 5, themed: true },
   { id: 'maraca', group: 'music', nameKey: 'gen.shape.maraca', shortKey: 'gen.short.maraca', kind: 'roll', least: 5, themed: true },
@@ -61,17 +105,17 @@ export const SHAPES = [
   { id: 'vase', group: 'vessels', nameKey: 'gen.shape.vase', shortKey: 'gen.short.vase', kind: 'roll', least: 5, stretch: false, caps: false, themed: true },
   { id: 'mug', group: 'vessels', nameKey: 'gen.shape.mug', shortKey: 'gen.short.mug', kind: 'roll', least: 5, themed: true },
   { id: 'keg', group: 'vessels', nameKey: 'gen.shape.keg', shortKey: 'gen.short.keg', kind: 'roll', least: 5, themed: true },
-  { id: 'potion', group: 'vessels', nameKey: 'gen.shape.potion', shortKey: 'gen.short.potion', kind: 'roll', least: 4, themed: true },
+  { id: 'potion', group: 'vessels', nameKey: 'gen.shape.potion', shortKey: 'gen.short.potion', kind: 'roll', least: 4, themed: true, options: POTION },
 
-  { id: 'scroll', group: 'things', nameKey: 'gen.shape.scroll', shortKey: 'gen.short.scroll', kind: 'roll', least: 3, stretch: true, caps: false, themed: true },
+  { id: 'scroll', group: 'things', nameKey: 'gen.shape.scroll', shortKey: 'gen.short.scroll', kind: 'roll', least: 3, stretch: true, caps: false, themed: true, options: SCROLL },
   { id: 'book', group: 'things', nameKey: 'gen.shape.book', shortKey: 'gen.short.book', kind: 'ends', stretch: true, caps: false, themed: true },
   { id: 'candle', group: 'things', nameKey: 'gen.shape.candle', shortKey: 'gen.short.candle', kind: 'roll', least: 4, themed: true },
   { id: 'tower', group: 'things', nameKey: 'gen.shape.tower', shortKey: 'gen.short.tower', kind: 'roll', least: 4, themed: true },
-  { id: 'hourglass', group: 'things', nameKey: 'gen.shape.hourglass', shortKey: 'gen.short.hourglass', kind: 'roll', least: 3, themed: true },
-  { id: 'crown', group: 'things', nameKey: 'gen.shape.crown', shortKey: 'gen.short.crown', kind: 'ends', stretch: true, themed: true },
+  { id: 'hourglass', group: 'things', nameKey: 'gen.shape.hourglass', shortKey: 'gen.short.hourglass', kind: 'roll', least: 3, themed: true, options: NUMBERS },
+  { id: 'crown', group: 'things', nameKey: 'gen.shape.crown', shortKey: 'gen.short.crown', kind: 'ends', stretch: true, themed: true, options: [scale('fins', 'gen.opt.points', 0.4, 1.8)] },
   { id: 'coin', group: 'things', nameKey: 'gen.shape.coin', shortKey: 'gen.short.coin', kind: 'ends', stretch: true, themed: true },
-  { id: 'gear', group: 'things', nameKey: 'gen.shape.gear', shortKey: 'gen.short.gear', kind: 'ends', stretch: true, themed: true },
-  { id: 'crystal', group: 'things', nameKey: 'gen.shape.crystal', shortKey: 'gen.short.crystal', kind: 'roll', least: 3, themed: true },
+  { id: 'gear', group: 'things', nameKey: 'gen.shape.gear', shortKey: 'gen.short.gear', kind: 'ends', stretch: true, themed: true, options: [scale('fins', 'gen.opt.teeth', 0.5, 2)] },
+  { id: 'crystal', group: 'things', nameKey: 'gen.shape.crystal', shortKey: 'gen.short.crystal', kind: 'roll', least: 3, themed: true, options: [{ id: 'side', type: 'count', labelKey: 'gen.opt.side', min: 0, max: 5, initial: 2 }] },
   { id: 'egg', group: 'things', nameKey: 'gen.shape.egg', shortKey: 'gen.short.egg', kind: 'poly', round: true, themed: true },
   { id: 'bone', group: 'things', nameKey: 'gen.shape.bone', shortKey: 'gen.short.bone', kind: 'roll', least: 3, themed: true },
   { id: 'mushroom', group: 'things', nameKey: 'gen.shape.mushroom', shortKey: 'gen.short.mushroom', kind: 'roll', least: 5, themed: true },
@@ -93,9 +137,53 @@ function unit(a) {
   return [a[0] / length, a[1] / length, a[2] / length];
 }
 
+// The shape's own settings with every value present and within its limits.
+export function optionsFor(shapeId, given) {
+  const out = {};
+  const raw = given && typeof given === 'object' ? given : {};
+  for (const option of shapeById(shapeId).options || []) {
+    const value = raw[option.id];
+    if (option.type === 'choice') {
+      out[option.id] = option.values.some((entry) => entry.id === value) ? value : option.initial;
+    } else if (option.type === 'check') {
+      out[option.id] = typeof value === 'boolean' ? value : option.initial;
+    } else {
+      const number = Number(value);
+      const within = value != null && value !== '' && Number.isFinite(number)
+        ? Math.min(option.max, Math.max(option.min, number))
+        : option.initial;
+      out[option.id] = option.type === 'count' ? Math.round(within) : within;
+    }
+  }
+  return out;
+}
+
+// The ways to share the facets of a die between two bands, the smaller band first.
+// Two unequal bands need an even number of facets each: the one lying flat then shows a facet
+// on top. Facets of the two bands that look almost the same way share one place to lie on, and
+// the die seldom stops on either, so the two counts must fall into step often: their least
+// common multiple is kept small. Two equal bands half a facet apart always do, odd ones too:
+// such a die lies on a facet of one band and shows a facet of the other.
+// paired: every band must have opposite facets.
+const SPLIT_STEP = 45;
+function splitsOf(faces, paired) {
+  const list = [];
+  if (faces % 2 || faces < 6) return list;
+  const half = faces / 2;
+  const divisor = (a, b) => (b ? divisor(b, a % b) : a);
+  for (let few = 4; few < half; few += 2) {
+    const many = faces - few;
+    if (few >= faces / 4 && (few * many) / divisor(few, many) <= SPLIT_STEP) list.push([few, many]);
+  }
+  if (half % 2 === 0 || !paired) list.push([half, half]);
+  return list;
+}
+
 // How many faces the solid gets for n outcomes, and whether the result reads from the top face.
-export function planDie(shapeId, outcomes, double) {
+// split: the facets of the two bands of a shape that carries a different set of numbers on each.
+export function planDie(shapeId, outcomes, double, given) {
   const shape = shapeById(shapeId);
+  const options = optionsFor(shapeId, given);
   const n = Math.max(MIN_OUTCOMES, Math.min(MAX_OUTCOMES, Math.round(outcomes)));
   // Every number on two opposite faces: the face count is an even multiple of n.
   const doubled = (least) => {
@@ -105,7 +193,17 @@ export function planDie(shapeId, outcomes, double) {
   };
   let faces;
   let top;
-  if (shape.id === 'sphere' || shape.round) {
+  let split = null;
+  if (options.numbers === 'split') {
+    // Not every count can be shared between two bands: see splitsOf. Then every number goes on
+    // two or four facets.
+    faces = double ? 2 * n : n;
+    while (!splitsOf(faces, double).length) faces += faces === n ? n : 2 * n;
+    top = true;
+    for (const pair of splitsOf(faces, double)) {
+      if (!split || Math.abs(pair[0] / faces - options.share) < Math.abs(split[0] / faces - options.share) - 1e-9) split = pair;
+    }
+  } else if (shape.id === 'sphere' || shape.round) {
     faces = !double && n >= 4 ? n : doubled(6);
     top = faces % 2 === 0 && faces !== 4;
   } else if (shape.id === 'spindle') {
@@ -123,7 +221,7 @@ export function planDie(shapeId, outcomes, double) {
     // A lopsided outline has no pairs of parallel sides, so only its two ends read from the top.
     top = faces % 2 === 0 && !shape.lopsided;
   }
-  return { shape: shape.id, outcomes: n, faces, repeat: faces / n, top, forced: faces !== n && !double };
+  return { shape: shape.id, outcomes: n, faces, repeat: faces / n, top, forced: faces !== n && !double, split };
 }
 
 function cyclic(list) {
@@ -534,7 +632,7 @@ function ringBetween(kit, outer, inner, zLow, zHigh) {
   return extrudeAt(kit, band, zLow, zHigh);
 }
 
-// A rolled parchment on a rod with a knob at each end. It lies on its side.
+// A rolled parchment on a rod with a finial at each end. It lies on its side.
 function buildScroll(kit, plan, spec) {
   const half = 1.2 * spec.stretch;
   const groove = 0.05;
@@ -551,23 +649,24 @@ function buildScroll(kit, plan, spec) {
   ];
   const profile = [[0, -half], ...end(-half, 1), [1, -half], [1, half], ...end(half, -1).reverse(), [0, half]];
   const body = lathe(kit, profile, plan.faces);
-  const tip = half + 0.6;
-  const rod = lathe(
-    kit,
-    [
-      [0, -tip],
-      [0.2, -tip + 0.04],
-      [0.3, -tip + 0.18],
-      [0.3, -tip + 0.3],
-      [0.2, -tip + 0.4],
-      [0.2, tip - 0.4],
-      [0.3, tip - 0.3],
-      [0.3, tip - 0.18],
-      [0.2, tip - 0.04],
-      [0, tip],
-    ],
-    32,
-  );
+  const radius = 0.2 * spec.options.rod;
+  // One end of the rod from its tip to where it runs straight, as (radius, distance from the tip).
+  let finial;
+  if (spec.options.finial === 'cone') {
+    finial = [[0, 0], [radius + 0.14, 0.5], [radius + 0.14, 0.58], [radius, 0.66]];
+  } else if (spec.options.finial === 'ball') {
+    const round = radius + 0.14;
+    const stop = Math.acos(radius / round);
+    finial = [[0, 0]];
+    for (let i = 1; i <= 8; i++) {
+      const angle = -Math.PI / 2 + (i / 8) * (Math.PI / 2 + stop);
+      finial.push([round * Math.cos(angle), round + round * Math.sin(angle)]);
+    }
+  } else {
+    finial = [[0, 0], [radius, 0.04], [radius + 0.1, 0.18], [radius + 0.1, 0.3], [radius, 0.4]];
+  }
+  const tip = half + 0.2 + finial[finial.length - 1][1];
+  const rod = lathe(kit, [...finial.map(([r, z]) => [r, z - tip]), ...finial.map(([r, z]) => [r, tip - z]).reverse()], 32);
   return { solid: union(kit, [body, rod]), faces: bandFaces(plan.faces, 1, -half, half, false) };
 }
 
@@ -882,59 +981,134 @@ function reorient(kit, built, [ex, ey, ez]) {
     v[0] * ex[1] + v[1] * ey[1] + v[2] * ez[1],
     v[0] * ex[2] + v[1] * ey[2] + v[2] * ez[2],
   ];
+  const turn = (face) => ({ ...face, normal: map(face.normal), polygon: face.polygon.map(map), up: map(face.up) });
   return {
     solid: kit.keep(built.solid.transform([ex[0], ex[1], ex[2], 0, ey[0], ey[1], ey[2], 0, ez[0], ez[1], ez[2], 0, 0, 0, 0, 1])),
-    faces: built.faces.map((face) => ({ normal: map(face.normal), polygon: face.polygon.map(map), up: map(face.up) })),
+    faces: built.faces.map(turn),
+    copies: (built.copies || []).map(turn),
+  };
+}
+
+// The same faces turned about the axis.
+function spun(faces, angle) {
+  const cos = Math.cos(angle);
+  const sin = Math.sin(angle);
+  const turn = (v) => [v[0] * cos - v[1] * sin, v[0] * sin + v[1] * cos, v[2]];
+  return faces.map((face) => ({ ...face, normal: turn(face.normal), polygon: face.polygon.map(turn), up: turn(face.up) }));
+}
+
+// How far to turn the second of two bands of facets about the axis, so that its facets
+// look as far away from the facets of the first as they can.
+function bandTurn(first, second) {
+  const divisor = (a, b) => (b ? divisor(b, a % b) : a);
+  const common = (first * second) / divisor(first, second);
+  return Math.PI / common + Math.PI / first - Math.PI / second;
+}
+
+// Volume of a lathed profile and its moment along the axis.
+function turnedMass(profile, segments) {
+  const area = (segments / 2) * Math.sin(TAU / segments);
+  let mass = 0;
+  let moment = 0;
+  for (let i = 0; i + 1 < profile.length; i++) {
+    const [r0, z0] = profile[i];
+    const [r1, z1] = profile[i + 1];
+    const rise = z1 - z0;
+    mass += (area * rise * (r0 * r0 + r0 * r1 + r1 * r1)) / 3;
+    moment += (area * rise * (z0 * (3 * r0 * r0 + 2 * r0 * r1 + r1 * r1) + z1 * (r0 * r0 + 2 * r0 * r1 + 3 * r1 * r1))) / 12;
+  }
+  return { mass, moment };
+}
+
+// How much wider the half with more facets has to be for a two-banded die to lie steadily on
+// every facet of both halves. Lying on its side, such a die rests on an edge of one rim and a
+// corner of the other; the triangle between them holds the centre of mass only when the edges
+// of both rims, seen from that centre, are equally wide: (1 - s) * edge of the few = s * edge
+// of the many, s being how far the centre is from the rim with the few facets.
+// centreAt(wide) gives s for a widening.
+function bandWiden(few, many, centreAt) {
+  if (few === many) return 1;
+  const lean = (wide) => {
+    const s = centreAt(wide);
+    return s * wide * Math.sin(Math.PI / many) - (1 - s) * Math.sin(Math.PI / few);
+  };
+  let low = 1;
+  let high = 4;
+  for (let i = 0; i < 40; i++) {
+    const middle = (low + high) / 2;
+    if (lean(middle) < 0) low = middle;
+    else high = middle;
+  }
+  return (low + high) / 2;
+}
+
+// The hilt of a sword or a dagger, pommel down: the profile up to the top of the guard
+// and the height the blade starts at.
+function hilt(options, { grip, length, swell, guard, thick }) {
+  const radius = grip * options.gripWidth;
+  const knob = radius + 0.2;
+  const top = 0.5 + length * options.gripLength;
+  const reach = guard * options.guardWidth;
+  const height = thick * options.guardThick;
+  const bevel = Math.min(0.1, height * 0.3);
+  const rings = Math.max(1, Math.round((top - 0.6) / 0.21));
+  const pitch = rings > 1 ? (top - 0.77) / (rings - 1) : 0;
+  const handle = swell
+    ? [[radius, 0.5], [radius * 1.27, (0.5 + top) / 2], [radius, top]]
+    : [[radius, 0.5], ...ringBumps(radius, 0.6, rings, pitch), [radius, top]];
+  return {
+    points: [
+      [0, 0], [knob - 0.14, 0], [knob, 0.14], [knob, 0.36], [knob - 0.14, 0.5],
+      ...handle,
+      [reach - bevel, top], [reach, top + bevel], [reach, top + height - bevel], [reach - bevel, top + height],
+    ],
+    top: top + height,
   };
 }
 
 // A sword stood on its pommel: the numbers run along the facets of the blade.
-function buildSword(kit, plan) {
-  const profile = [
-    [0, 0], [0.3, 0], [0.44, 0.14], [0.44, 0.36], [0.3, 0.5], [0.24, 0.5],
-    ...ringBumps(0.24, 0.62, 4, 0.2),
-    [0.24, 1.45], [0.9, 1.45], [1, 1.55], [1, 1.7], [0.9, 1.8],
-    [0.62, 1.8], [0.62, 5.0], [0, 5.9],
-  ];
-  return turned(kit, plan, profile, { radius: 0.62, low: 1.9, high: 4.95, upright: false });
+function buildSword(kit, plan, spec) {
+  const { points, top } = hilt(spec.options, { grip: 0.24, length: 0.95, guard: 1, thick: 0.35 });
+  const profile = [...points, [0.62, top], [0.62, top + 3.2], [0, top + 4.1]];
+  return turned(kit, plan, profile, { radius: 0.62, low: top + 0.1, high: top + 3.15, upright: false });
 }
 
-// A dagger: a swelling grip, a guard that droops, a short blade with a long point.
-function buildDagger(kit, plan) {
-  const profile = [
-    [0, 0], [0.24, 0], [0.4, 0.1], [0.4, 0.3], [0.26, 0.42], [0.33, 0.9], [0.26, 1.35],
-    [0.8, 1.22], [1, 1.28], [1, 1.46], [0.82, 1.6],
-    [0.72, 1.6], [0.72, 3.0], [0, 4.7],
-  ];
-  return turned(kit, plan, profile, { radius: 0.72, low: 1.7, high: 2.95, upright: false });
+// A dagger: a swelling grip, a flat guard, a short blade with a long point.
+function buildDagger(kit, plan, spec) {
+  const { points, top } = hilt(spec.options, { grip: 0.26, length: 0.85, swell: true, guard: 1, thick: 0.32 });
+  const profile = [...points, [0.72, top], [0.72, top + 1.4], [0, top + 3.1]];
+  return turned(kit, plan, profile, { radius: 0.72, low: top + 0.1, high: top + 1.35, upright: false });
 }
 
 // A mace: flanges stand on the edges of the head, so it comes to rest with a facet up.
-function buildMace(kit, plan) {
+function buildMace(kit, plan, spec) {
   const profile = [
     [0, 0], [0.3, 0], [0.42, 0.12], [0.42, 0.3], [0.24, 0.42],
     ...ringBumps(0.24, 0.7, 3, 0.22),
     [0.24, 3.0], [0.5, 3.0], [0.5, 3.15],
     [0.9, 3.3], [0.9, 4.5], [0.5, 4.72], [0.22, 4.78], [0.1, 5.35], [0, 5.4],
   ];
-  const flanged = plan.faces <= 12;
+  const size = spec.options.fins;
+  const flanged = plan.faces <= 12 && size > 0.02;
   const parts = [];
   if (flanged) {
-    const outline = [[0.8, 3.3], [1.2, 3.72], [1.2, 4.08], [0.8, 4.5]];
+    const reach = 0.9 + 0.3 * size;
+    const outline = [[0.8, 3.3], [reach, 3.72], [reach, 4.08], [0.8, 4.5]];
     for (let i = 0; i < plan.faces; i++) parts.push(fin(kit, outline, 0.1, (i * TAU) / plan.faces));
   }
   return turned(kit, plan, profile, { radius: 0.9, low: 3.35, high: 4.45, margin: flanged ? 0.08 : 0 }, parts);
 }
 
-// A spear: the numbers go on the wide part of the head.
-function buildSpear(kit, plan) {
+// A spear: a stout shaft, a socket, and a leaf-shaped head with the numbers on its wide part.
+function buildSpear(kit, plan, spec) {
+  const shaft = 0.5 * spec.options.shaft;
   const profile = [
-    [0, 0], [0.18, 0], [0.3, 0.25],
-    ...ringBumps(0.3, 1.3, 2, 0.3),
-    [0.3, 3.9], [0.44, 3.9], [0.44, 4.2], [0.36, 4.32],
-    [1, 4.95], [1, 5.9], [0, 7.6],
+    [0, 0], [shaft * 0.6, 0], [shaft, 0.25],
+    ...ringBumps(shaft, 1.3, 2, 0.3),
+    [shaft, 3.9], [shaft + 0.12, 3.9], [shaft + 0.12, 4.2], [shaft + 0.04, 4.32],
+    [1, 5.0], [1, 5.9], [0, 7.9],
   ];
-  return turned(kit, plan, profile, { low: 5.0, high: 5.85, upright: false });
+  return turned(kit, plan, profile, { low: 5.05, high: 5.85, upright: false });
 }
 
 // A wizard's staff: a faceted cup with an orb in it.
@@ -968,10 +1142,11 @@ function buildTorch(kit, plan) {
   return turned(kit, plan, profile, { low: 3.27, high: 4.25 }, [flame]);
 }
 
-// A hand bell, mouth down, hollow, with a clapper.
-function buildBell(kit, plan) {
+// A hand bell, mouth down and hollow. The clapper can be left out.
+function buildBell(kit, plan, spec) {
+  const clapper = [[0, 0.12], [0.18, 0.14], [0.27, 0.3], [0.27, 0.42], [0.18, 0.58], [0.07, 0.62], [0.07, 1.95]];
   const profile = [
-    [0, 0.12], [0.18, 0.14], [0.27, 0.3], [0.27, 0.42], [0.18, 0.58], [0.07, 0.62], [0.07, 1.95],
+    ...(spec.options.clapper ? clapper : [[0, 1.95]]),
     [0.4, 1.95], [0.46, 1.5], [0.6, 1.15], [0.8, 0.85], [0.84, 0],
     [1, 0], [1, 1.0], [0.78, 1.25], [0.64, 1.6], [0.58, 1.95], [0.52, 2.2], [0.38, 2.38],
     [0.2, 2.45], [0.2, 3.3], [0.34, 3.4], [0.34, 3.65], [0.2, 3.75], [0, 3.75],
@@ -979,25 +1154,26 @@ function buildBell(kit, plan) {
   return turned(kit, plan, profile, { low: 0.05, high: 0.95 });
 }
 
-// A pipe with finger holes above the numbers and a flared foot.
+// A pipe: the numbers go round the thick foot joint, the finger holes sit on the thin tube above it.
 function buildFlute(kit, plan) {
+  const tube = 0.5;
   const profile = [
     [0, 0.6], [0.35, 0.6], [0.5, 0], [1, 0], [1, 0.25], [0.75, 0.62],
-    [0.75, 2.9], [0.86, 2.9], [0.86, 3.1], [0.72, 3.1],
-    [0.72, 5.9], [0.83, 5.9], [0.83, 6.1], [0.74, 6.1], [0.74, 6.8], [0.45, 7.5], [0, 7.5],
+    [0.75, 2.9], [0.86, 2.9], [0.86, 3.1], [0.7, 3.1], [tube, 3.3],
+    [tube, 5.9], [tube + 0.1, 5.9], [tube + 0.1, 6.1], [tube + 0.02, 6.1], [tube + 0.02, 6.8], [0.3, 7.5], [0, 7.5],
   ];
   // The holes sit in the middle of one facet.
   const front = Math.PI / plan.faces;
   const out = [Math.cos(front), Math.sin(front), 0];
-  const width = facetWidth(plan.faces, 0.72);
-  const bore = Math.min(0.13, width * 0.35);
+  const width = facetWidth(plan.faces, tube);
+  const bore = Math.min(0.11, width * 0.35);
   const holes = [];
   for (let i = 0; i < 5; i++) {
-    const hole = kit.keep(kit.api.Manifold.cylinder(1, bore, bore, 12, true));
-    holes.push(aim(kit, hole, out, [0.6 * out[0], 0.6 * out[1], 3.6 + i * 0.45]));
+    const hole = kit.keep(kit.api.Manifold.cylinder(0.8, bore, bore, 12, true));
+    holes.push(aim(kit, hole, out, [tube * out[0], tube * out[1], 3.75 + i * 0.42]));
   }
-  const windowCut = kit.keep(kit.api.Manifold.cube([0.5, Math.min(0.3, width * 0.6), 0.22], true));
-  const placed = kit.keep(windowCut.translate(0.8, 0, 6.45));
+  const windowCut = kit.keep(kit.api.Manifold.cube([0.5, Math.min(0.26, width * 0.6), 0.22], true));
+  const placed = kit.keep(windowCut.translate(tube + 0.05, 0, 6.45));
   holes.push(kit.keep(placed.rotate([0, 0, degrees(front)])));
   return turned(kit, plan, profile, { radius: 0.75, low: 0.7, high: 2.8, upright: false }, [], holes);
 }
@@ -1012,14 +1188,29 @@ function buildFanfare(kit, plan) {
   return turned(kit, plan, profile, { low: 0.05, high: 1.25 });
 }
 
+// A maraca: a round head on a thin handle. The numbers go round the widest part of the head.
 function buildMaraca(kit, plan) {
+  const centre = 3.5;
+  const half = 0.38;
+  const round = Math.hypot(1, half);
+  const band = Math.asin(half / round);
+  // The head is a ball with a straight belt for the numbers.
+  const arc = (from, to, steps) => {
+    const points = [];
+    for (let i = 0; i <= steps; i++) {
+      const angle = from + ((to - from) * i) / steps;
+      points.push([round * Math.cos(angle), centre + round * Math.sin(angle)]);
+    }
+    return points;
+  };
   const profile = [
-    [0, 0], [0.26, 0], [0.32, 0.08], [0.32, 0.25], [0.26, 0.3],
-    ...ringBumps(0.26, 0.6, 3, 0.3),
-    [0.26, 2.0], [0.4, 2.05], [0.4, 2.2],
-    [0.75, 2.45], [1, 2.9], [1, 3.9], [0.86, 4.35], [0.6, 4.65], [0.3, 4.8], [0, 4.84],
+    [0, 0], [0.22, 0], [0.32, 0.1], [0.32, 0.3], [0.25, 0.42],
+    [0.2, 2.3], [0.3, 2.34], [0.3, 2.46],
+    ...arc(-1.27, -band, 5),
+    ...arc(band, 1.45, 6),
+    [0, centre + round],
   ];
-  return turned(kit, plan, profile, { low: 2.95, high: 3.85 });
+  return turned(kit, plan, profile, { low: centre - half + 0.04, high: centre + half - 0.04 });
 }
 
 // A goblet drum: a hollow foot, a bowl, a skin in a hoop, ropes along the edges.
@@ -1060,11 +1251,9 @@ function buildLute(kit, plan) {
   return turned(kit, plan, profile, { low: 0.7, high: 1.65 }, [head, bridge], [hole]);
 }
 
-// A war hammer: the head lies across, the numbers go on one half of it, the handle hangs down.
-function buildHammer(kit, plan) {
-  const profile = [[0, -1.3], [0.7, -1.3], [0.8, -1.2], [0.8, 1.2], [0.7, 1.3], [0, 1.3]];
-  const front = Math.PI / plan.faces;
-  const out = [Math.cos(front), Math.sin(front), 0];
+// A war hammer: the head lies across, the handle hangs down. Both halves of the head carry numbers:
+// the same ones, or a different set on each half, which then has its own count of facets.
+function buildHammer(kit, plan, spec) {
   const shaft = lathe(
     kit,
     [
@@ -1074,25 +1263,48 @@ function buildHammer(kit, plan) {
     ],
     18,
   );
-  const built = {
-    solid: union(kit, [lathe(kit, profile, plan.faces), aim(kit, shaft, out)]),
-    faces: bandFaces(plan.faces, 0.8, 0.32, 1.15, false),
-  };
+  let front;
+  let head;
+  let faces;
+  let copies = [];
+  if (plan.split) {
+    const [few, many] = plan.split;
+    front = Math.PI / few;
+    const turn = bandTurn(few, many);
+    const half = [[0, 0.1], [0.8, 0.1], [0.8, 1.2], [0.7, 1.3], [0, 1.3]];
+    const far = lathe(kit, half.map(([r, z]) => [r, -z]), many);
+    const collar = lathe(kit, [[0, -0.26], [0.84, -0.26], [0.88, -0.2], [0.88, 0.2], [0.84, 0.26], [0, 0.26]], 32);
+    head = [lathe(kit, half, few), kit.keep(far.rotate([0, 0, degrees(turn)])), collar];
+    faces = [
+      ...bandFaces(few, 0.8, 0.32, 1.15, false).map((face) => ({ ...face, band: 0 })),
+      ...spun(bandFaces(many, 0.8, -1.15, -0.32, false), turn).map((face) => ({ ...face, band: 1 })),
+    ];
+  } else {
+    front = Math.PI / plan.faces;
+    head = [lathe(kit, [[0, -1.3], [0.7, -1.3], [0.8, -1.2], [0.8, 1.2], [0.7, 1.3], [0, 1.3]], plan.faces)];
+    faces = bandFaces(plan.faces, 0.8, 0.32, 1.15, false);
+    copies = bandFaces(plan.faces, 0.8, -1.15, -0.32, false).map((face, of) => ({ ...face, of }));
+  }
+  // The handle leaves through the middle of a facet.
+  const out = [Math.cos(front), Math.sin(front), 0];
+  const built = { solid: union(kit, [...head, aim(kit, shaft, out)]), faces, copies };
   const sin = Math.sin(front);
   const cos = Math.cos(front);
   return reorient(kit, built, [[0, -sin, -cos], [0, cos, -sin], [1, 0, 0]]);
 }
 
 // A battle axe: the blades stand on the edges of the block the numbers go on.
-function buildAxe(kit, plan) {
+function buildAxe(kit, plan, spec) {
   const profile = [
     [0, 0], [0.3, 0], [0.36, 0.1], [0.36, 0.3], [0.26, 0.4],
     ...ringBumps(0.26, 0.7, 3, 0.25),
     [0.26, 3.3], [0.7, 3.4], [0.8, 3.5], [0.8, 4.7], [0.7, 4.8], [0.3, 4.85], [0.22, 5.0], [0, 5.7],
   ];
+  // The blade grows from where it leaves the block.
+  const size = spec.options.fins;
   const outline = [
     [0.7, 3.7], [1.3, 3.55], [2.0, 2.75], [2.25, 3.4], [2.35, 4.1], [2.25, 4.8], [2.0, 5.45], [1.3, 4.65], [0.7, 4.5],
-  ];
+  ].map(([r, z]) => (r <= 0.7 ? [r, z] : [0.7 + (r - 0.7) * size, 4.1 + (z - 4.1) * size]));
   const thickness = Math.min(0.16, facetWidth(plan.faces, 0.8) * 0.35);
   const parts = [fin(kit, outline, thickness, 0)];
   // An even block has an edge straight across for the second blade.
@@ -1113,12 +1325,30 @@ function buildCannon(kit, plan) {
   return turned(kit, plan, profile, { low: 0.75, high: 1.95, upright: false }, parts);
 }
 
-function buildPotion(kit, plan) {
-  const profile = [
-    [0, 0], [0.92, 0], [1, 0.08], [1, 1.5], [0.9, 1.78], [0.6, 2.05], [0.38, 2.2],
-    [0.38, 2.75], [0.5, 2.75], [0.5, 2.9], [0.34, 2.9], [0.3, 3.25], [0, 3.25],
-  ];
-  return turned(kit, plan, profile, { low: 0.13, high: 1.45 });
+// A potion: a faceted bottle, a neck that may be turned round, and a stopper.
+function buildPotion(kit, plan, spec) {
+  const tall = 1.5 * spec.options.body;
+  const round = spec.options.neck === 'round';
+  const bore = 0.38;
+  // A round neck stands inside the facets of the shoulder, not over their corners.
+  const collar = round ? Math.min(0.62, bore / Math.cos(Math.PI / plan.faces) + 0.02) : bore + 0.04;
+  const shoulder = tall + 0.7;
+  const bottle = lathe(
+    kit,
+    [[0, 0], [0.92, 0], [1, 0.08], [1, tall], [0.9, tall + 0.28], [0.66, tall + 0.55], [collar, shoulder], [0, shoulder]],
+    plan.faces,
+  );
+  const lip = shoulder + 0.55;
+  const top = lip + 0.15;
+  const neck = [[0, shoulder - 0.12], [bore, shoulder - 0.12], [bore, lip], [0.5, lip], [0.5, top]];
+  const stopper = spec.options.stopper;
+  if (stopper === 'cork') neck.push([0.34, top], [0.3, top + 0.35], [0, top + 0.35]);
+  else if (stopper === 'none') neck.push([0.26, top], [0.26, top - 0.45], [0, top - 0.45]);
+  else neck.push([0, top]);
+  const parts = [bottle, lathe(kit, neck, round ? 32 : plan.faces)];
+  if (stopper === 'ball') parts.push(ball(kit, 0.36, [0, 0, top + 0.22], 20));
+  if (stopper === 'crystal') parts.push(lathe(kit, [[0, top - 0.05], [0.22, top - 0.05], [0.4, top + 0.3], [0, top + 0.85]], 6));
+  return { solid: union(kit, parts), faces: bandFaces(plan.faces, 1, 0.13, tall - 0.05, true) };
 }
 
 // A tankard with a handle on one edge and foam on top.
@@ -1186,14 +1416,43 @@ function buildTower(kit, plan) {
   return turned(kit, plan, profile, { radius: 0.85, low: 0.55, high: 2.85 }, [], gaps);
 }
 
-// An hourglass between two plates, with a post on every edge.
+// An hourglass between two plates. Both bulbs carry numbers: the same ones, with a post on every
+// edge, or a different set on each bulb, which then has its own count of facets.
 function buildHourglass(kit, plan) {
+  if (plan.split) {
+    const [few, many] = plan.split;
+    const turn = bandTurn(many, few);
+    const half = (wide) => [
+      [0, 0], [wide, 0], [wide, 0.3], [0.78 * wide, 0.3], [0.78 * wide, 1.3], [0.14, 1.96], [0.14, 2.06], [0, 2.06],
+    ];
+    // The bulb with more facets is the wider and the heavier one: see bandWiden.
+    const small = turnedMass(half(1), few);
+    const wide = bandWiden(few, many, (width) => {
+      const large = turnedMass(half(width), many);
+      const centre = (small.moment + 4 * large.mass - large.moment) / (small.mass + large.mass);
+      // Measured between the middles of the two rims.
+      return (centre - 0.15) / 3.7;
+    });
+    const upper = lathe(kit, half(1).map(([r, z]) => [r, 4 - z]), few);
+    return {
+      solid: union(kit, [lathe(kit, half(wide), many), kit.keep(upper.rotate([0, 0, degrees(turn)]))]),
+      faces: [
+        ...bandFaces(many, 0.78 * wide, 0.35, 1.25, true).map((face) => ({ ...face, band: 0 })),
+        ...spun(bandFaces(few, 0.78, 2.75, 3.65, true), turn).map((face) => ({ ...face, band: 1 })),
+      ],
+    };
+  }
   const profile = [
-    [0, 0], [1, 0], [1, 0.3], [0.78, 0.3], [0.78, 1.3], [0.12, 2.0], [0.78, 2.7], [0.78, 3.7], [1, 3.7], [1, 4], [0, 4],
+    [0, 0], [1, 0], [1, 0.3], [0.78, 0.3], [0.78, 1.3], [0.14, 2.0], [0.78, 2.7], [0.78, 3.7], [1, 3.7], [1, 4], [0, 4],
   ];
   const posted = plan.faces <= 12;
+  const margin = posted ? 0.08 : 0;
   const parts = posted ? edgeRods(kit, plan.faces, 0.9, 0.3, 3.7, 0.055) : [];
-  return turned(kit, plan, profile, { radius: 0.78, low: 0.35, high: 1.25, margin: posted ? 0.08 : 0 }, parts);
+  return {
+    solid: union(kit, [lathe(kit, profile, plan.faces), ...parts]),
+    faces: bandFaces(plan.faces, 0.78, 0.35, 1.25, true, margin),
+    copies: bandFaces(plan.faces, 0.78, 2.75, 3.65, true, margin).map((face, of) => ({ ...face, of })),
+  };
 }
 
 // A bone: the numbers run along the shaft between the two knuckles.
@@ -1220,8 +1479,8 @@ function buildMushroom(kit, plan) {
   return turned(kit, plan, profile, { low: 1.55, high: 2.25 }, parts);
 }
 
-// A crystal with two smaller ones grown from its foot.
-function buildCrystal(kit, plan) {
+// A crystal with smaller ones grown from its foot, each on an edge of its own.
+function buildCrystal(kit, plan, spec) {
   const profile = [[0, 0], [0.7, 0.25], [1, 0.6], [1, 3.2], [0.28, 4.5], [0, 4.56]];
   const tilt = (38 * Math.PI) / 180;
   const small = (radius, length, edge) => {
@@ -1231,7 +1490,16 @@ function buildCrystal(kit, plan) {
     const direction = [Math.sin(tilt) * Math.cos(angle), Math.sin(tilt) * Math.sin(angle), Math.cos(tilt)];
     return aim(kit, union(kit, [shaft, point]), direction, [0.45 * Math.cos(angle), 0.45 * Math.sin(angle), 0.25]);
   };
-  const parts = [small(0.36, 1.5, 0), small(0.28, 1.1, Math.round(plan.faces * 0.42))];
+  // Thickness, length and how far round the foot each one stands.
+  const grown = [[0.36, 1.5, 0], [0.28, 1.1, 0.42], [0.24, 0.9, 0.72], [0.3, 1.25, 0.21], [0.2, 0.75, 0.58]];
+  const taken = new Set();
+  const parts = [];
+  for (const [radius, length, around] of grown.slice(0, spec.options.side)) {
+    const edge = Math.round(plan.faces * around) % plan.faces;
+    if (taken.has(edge)) continue;
+    taken.add(edge);
+    parts.push(small(radius, length, edge));
+  }
   return turned(kit, plan, profile, { low: 1.75, high: 3.15 }, parts);
 }
 
@@ -1288,30 +1556,41 @@ function buildShield(kit, plan, spec) {
   return { solid: union(kit, parts), faces };
 }
 
-// A throwing star: a thick hub with a thin blade on every corner.
+// A throwing star: a small hub with a blade on every corner. The blades are ground thin towards
+// the tips, which stay on the corners' lines, so the star stands on two tips with a side up.
 function buildShuriken(kit, plan, spec) {
   const coin = plan.faces === 2;
   const sides = coin ? 4 : plan.faces - 2;
-  const hub = regularPolygon(sides, 0.62);
-  const height = (coin ? 0.2 : Math.min(0.55, fairHeight(polygonArea(hub), plan.faces))) * spec.stretch;
+  const radius = 0.5;
+  const hub = regularPolygon(sides, radius);
+  const height = (coin ? 0.2 : Math.min(0.5, fairHeight(polygonArea(hub), plan.faces))) * spec.stretch;
   const top = height / 2;
-  const thin = coin ? top : top * 0.45;
-  const reach = coin ? 1.3 : 1;
+  const reach = 1.2 * spec.options.fins;
+  // How much of each side of the hub a blade takes. A plain star needs no room for numbers on its sides.
+  // Crowded blades are slimmer, so that they keep clear of the numbers between them.
+  const foot = coin ? 0.5 : sides > 60 ? 0.2 : 0.3;
+  const thick = top * (coin ? 1 : 0.7);
+  const edge = Math.min(thick, Math.max(0.02, thick * 0.3));
   const parts = [extrudeAt(kit, sectionOf(kit, hub), -top, top)];
   const between = (a, b, t) => [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t];
   for (let i = 0; i < sides; i++) {
     const corner = hub[i];
     const angle = (i * TAU) / sides;
-    const blade = [
-      between(corner, hub[(i + sides - 1) % sides], 0.2),
-      [reach * Math.cos(angle), reach * Math.sin(angle)],
-      between(corner, hub[(i + 1) % sides], 0.2),
-      [corner[0] * 0.75, corner[1] * 0.75],
+    const base = [
+      between(corner, hub[(i + sides - 1) % sides], foot),
+      between(corner, hub[(i + 1) % sides], foot),
+      [corner[0] * 0.4, corner[1] * 0.4],
     ];
-    parts.push(extrudeAt(kit, sectionOf(kit, blade), -thin, thin));
+    const tip = [reach * Math.cos(angle), reach * Math.sin(angle)];
+    const points = [];
+    for (const side of [1, -1]) {
+      for (const [x, y] of base) points.push([x, y, side * thick]);
+      points.push([tip[0], tip[1], side * edge]);
+    }
+    parts.push(kit.keep(kit.api.Manifold.hull(points)));
   }
-  const faces = endFaces(regularPolygon(sides, 0.5), top, -top);
-  if (!coin) faces.push(...bandFaces(sides, 0.62, -top, top, true, facetWidth(sides, 0.62) * 0.2 + 0.02));
+  const faces = endFaces(regularPolygon(sides, radius * 0.8), top, -top);
+  if (!coin) faces.push(...bandFaces(sides, radius, -top, top, true, facetWidth(sides, radius) * foot + 0.02));
   return { solid: union(kit, parts), faces };
 }
 
@@ -1419,12 +1698,13 @@ function buildGear(kit, plan, spec) {
   const width = facetWidth(sides, radius);
   const foot = width * 0.34;
   const tip = width * 0.2;
+  const reach = radius + 0.2 * spec.options.fins;
   const parts = [extrudeAt(kit, sectionOf(kit, body), -top, top)];
   for (let i = 0; i < sides; i++) {
     const angle = (i * TAU) / sides;
     const cos = Math.cos(angle);
     const sin = Math.sin(angle);
-    const tooth = [[0.7, -foot / 2], [1, -tip / 2], [1, tip / 2], [0.7, foot / 2]].map(([u, v]) => [u * cos - v * sin, u * sin + v * cos]);
+    const tooth = [[0.7, -foot / 2], [reach, -tip / 2], [reach, tip / 2], [0.7, foot / 2]].map(([u, v]) => [u * cos - v * sin, u * sin + v * cos]);
     parts.push(extrudeAt(kit, sectionOf(kit, tooth), -top, top));
   }
   const apothem = radius * Math.cos(Math.PI / sides);
@@ -1485,7 +1765,7 @@ function buildCrown(kit, plan, spec) {
   const sides = coin ? 48 : plan.faces - 2;
   const height = (coin ? 0.7 : Math.min(1.1, fairHeight(polygonArea(regularPolygon(sides)), plan.faces))) * spec.stretch;
   const top = height / 2;
-  const rise = 0.55;
+  const rise = 0.55 * spec.options.fins;
   const profile = [
     [0, -top], [1.04, -top], [1.04, -top + 0.12], [1, -top + 0.12], [1, top], [0.86, top], [0.84, top - 0.1], [0, top - 0.1],
   ];
@@ -1557,11 +1837,12 @@ function buildMorningstar(kit, plan, spec) {
   const parts = [solid];
   const corners = cornersOf(faces);
   for (const corner of corners) {
-    const tip = corner.length * 1.3;
+    const tip = corner.length * (1 + 0.3 * spec.options.fins);
     const slope = Math.sqrt(1 - 1 / (corner.length * corner.length));
     // The spike widens on its way into the ball, so on the faces it is thicker than at the corner.
-    const onFaces = (thick) => thick / Math.max(0.2, 1 - (thick * slope) / (0.3 * corner.length));
-    let thick = Math.min(0.2, corner.nearest * 0.25);
+    const onFaces = (thick) => thick / Math.max(0.2, 1 - (thick * slope * corner.length) / (tip - corner.length));
+    // A short spike stays a spike, not a wart: no wider than it is long.
+    let thick = Math.min(0.2, corner.nearest * 0.25, (tip - corner.length) * 0.5);
     for (let i = 0; i < 24 && reachOnFaces(onFaces(thick), corner.length) > corner.nearest * 0.3; i++) thick *= 0.85;
     corner.room = reachOnFaces(onFaces(thick), corner.length);
     const foot = (thick * (tip - 0.8)) / (tip - corner.length);
@@ -1678,7 +1959,9 @@ function centroid(polygon, normal) {
 
 // Opposite faces of a plain die add up to n + 1; on a doubled die they carry the same number.
 function numberFaces(faces, outcomes) {
-  const opposite = faces.map((face, i) => faces.findIndex((other, j) => j !== i && dot(face.normal, other.normal) < -0.9999));
+  // Faces of two different bands may be all but parallel; they are no pair.
+  const opposite = faces.map((face, i) =>
+    faces.findIndex((other, j) => j !== i && other.band === face.band && dot(face.normal, other.normal) < -0.9999));
   const values = new Array(faces.length).fill(0);
   if (opposite.every((j) => j >= 0)) {
     let pair = 0;
@@ -1706,17 +1989,19 @@ function numberFaces(faces, outcomes) {
   return values.map((value) => (marked && (value === 6 || value === 9) ? `${value}.` : String(value)));
 }
 
-// spec: { shape, outcomes, double, size, stretch, caps }. Lengths come out in the units of size.
+// spec: { shape, outcomes, double, size, stretch, caps, options }. Lengths come out in the units of size.
+// copies: how many faces at the end of the list repeat the number of another face.
 export function buildDie(api, spec) {
-  const plan = planDie(spec.shape, spec.outcomes, Boolean(spec.double));
+  const plan = planDie(spec.shape, spec.outcomes, Boolean(spec.double), spec.options);
   const settings = {
     stretch: Math.min(3, Math.max(0.3, Number(spec.stretch) || 1)),
     caps: CAPS.includes(spec.caps) ? spec.caps : CAPS[0],
+    options: optionsFor(plan.shape, spec.options),
   };
   const size = Math.max(1, Number(spec.size) || 20);
   const kit = tracker(api);
   try {
-    const { solid, faces } = BUILDERS[plan.shape](kit, plan, settings);
+    const { solid, faces, copies = [] } = BUILDERS[plan.shape](kit, plan, settings);
     const status = solid.status();
     if (status !== 'NoError') throw new Error(`die solid: ${status}`);
     const mesh = solid.getMesh();
@@ -1743,15 +2028,20 @@ export function buildDie(api, spec) {
       positions.set(p, i * 3);
     }
     const labels = numberFaces(faces, plan.outcomes);
+    const placed = (face, label) => {
+      const polygon = face.polygon.map(place);
+      const normal = unit(face.normal);
+      return { normal, polygon, up: unit(face.up), center: centroid(polygon, normal), label };
+    };
     return {
       plan,
       positions,
       index: Uint32Array.from(mesh.triVerts),
-      faces: faces.map((face, i) => {
-        const polygon = face.polygon.map(place);
-        const normal = unit(face.normal);
-        return { normal, polygon, up: unit(face.up), center: centroid(polygon, normal), label: labels[i] };
-      }),
+      faces: [
+        ...faces.map((face, i) => placed(face, labels[i])),
+        ...copies.map((face) => placed(face, labels[face.of])),
+      ],
+      copies: copies.length,
     };
   } finally {
     kit.free();

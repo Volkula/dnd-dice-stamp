@@ -2,7 +2,7 @@
 
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
-import { t } from './i18n.js?v=8';
+import { t } from './i18n.js?v=9';
 import {
   SHAPES,
   GROUPS,
@@ -10,10 +10,11 @@ import {
   MIN_OUTCOMES,
   MAX_OUTCOMES,
   shapeById,
+  optionsFor,
   planDie,
   buildDie,
   fitHeight,
-} from './dicegen.js?v=8';
+} from './dicegen.js?v=9';
 
 const SETTINGS_KEY = 'dice.gen';
 const MAX_BATCH = 12;
@@ -35,14 +36,16 @@ export function parseCounts(text) {
   return out;
 }
 
-export function createGenerator({ engine, onAdd }) {
+export function createGenerator({ engine, onAdd, onApply }) {
   const $ = (id) => document.getElementById(id);
   const ui = {
     root: $('gen'),
+    title: $('gen-title'),
     close: $('gen-close'),
     stage: $('gen-stage'),
     shape: $('gen-shape'),
     counts: $('gen-counts'),
+    countsLabel: $('gen-counts-label'),
     size: $('gen-size'),
     sizeNum: $('gen-size-num'),
     stretchRow: $('gen-stretch-row'),
@@ -50,9 +53,11 @@ export function createGenerator({ engine, onAdd }) {
     stretchOut: $('gen-stretch-out'),
     capsRow: $('gen-caps-row'),
     caps: $('gen-caps'),
+    options: $('gen-options'),
     double: $('gen-double'),
     number: $('gen-number'),
     info: $('gen-info'),
+    note: $('gen-note'),
     add: $('gen-add'),
   };
 
@@ -64,10 +69,21 @@ export function createGenerator({ engine, onAdd }) {
   // 'ok' | 'wait' | 'counts' | 'failed'
   let state = 'ok';
   const textures = new Map();
+  // What each shape's own settings were last set to, by shape id.
+  let optionValues = {};
+  // The rows of the shape on screen: { option, row, input, out }.
+  let optionRows = [];
+  // Set while the dialog changes a die that is already on the scene: { name }.
+  let editing = null;
+  let formBefore = null;
 
   function sizeValue() {
     const value = Number(ui.sizeNum.value);
     return Number.isFinite(value) && value > 0 ? Math.min(500, Math.max(2, value)) : 20;
+  }
+
+  function shapeOptions() {
+    return optionsFor(ui.shape.value, optionValues[ui.shape.value]);
   }
 
   function specFor(outcomes) {
@@ -78,20 +94,48 @@ export function createGenerator({ engine, onAdd }) {
       size: sizeValue(),
       stretch: Number(ui.stretch.value) || 1,
       caps: ui.caps.value,
+      options: shapeOptions(),
     };
   }
 
+  function formState() {
+    return {
+      shape: ui.shape.value,
+      counts: ui.counts.value,
+      size: sizeValue(),
+      stretch: Number(ui.stretch.value) || 1,
+      caps: ui.caps.value,
+      double: ui.double.checked,
+      number: ui.number.checked,
+      options: JSON.parse(JSON.stringify(optionValues)),
+    };
+  }
+
+  function applyState(saved) {
+    if (SHAPES.some((shape) => shape.id === saved.shape)) ui.shape.value = saved.shape;
+    if (typeof saved.counts === 'string' && parseCounts(saved.counts)) ui.counts.value = saved.counts;
+    if (Number.isFinite(saved.size) && saved.size > 0) {
+      ui.size.value = String(saved.size);
+      ui.sizeNum.value = String(saved.size);
+    }
+    if (Number.isFinite(saved.stretch)) ui.stretch.value = String(saved.stretch);
+    if (CAPS.includes(saved.caps)) ui.caps.value = saved.caps;
+    if (typeof saved.double === 'boolean') ui.double.checked = saved.double;
+    if (typeof saved.number === 'boolean') ui.number.checked = saved.number;
+    if (saved.options && typeof saved.options === 'object') {
+      optionValues = {};
+      for (const shape of SHAPES) {
+        if (shape.options && saved.options[shape.id]) optionValues[shape.id] = optionsFor(shape.id, saved.options[shape.id]);
+      }
+    }
+    buildOptionRows();
+  }
+
+  // A die being changed on the scene must not overwrite what the next new die starts from.
   function saveSettings() {
+    if (editing) return;
     try {
-      localStorage.setItem(SETTINGS_KEY, JSON.stringify({
-        shape: ui.shape.value,
-        counts: ui.counts.value,
-        size: sizeValue(),
-        stretch: Number(ui.stretch.value) || 1,
-        caps: ui.caps.value,
-        double: ui.double.checked,
-        number: ui.number.checked,
-      }));
+      localStorage.setItem(SETTINGS_KEY, JSON.stringify(formState()));
     } catch {
       // The settings then last for this visit only.
     }
@@ -104,16 +148,82 @@ export function createGenerator({ engine, onAdd }) {
     } catch {
       saved = {};
     }
-    if (SHAPES.some((shape) => shape.id === saved.shape)) ui.shape.value = saved.shape;
-    if (typeof saved.counts === 'string' && parseCounts(saved.counts)) ui.counts.value = saved.counts;
-    if (Number.isFinite(saved.size) && saved.size > 0) {
-      ui.size.value = String(saved.size);
-      ui.sizeNum.value = String(saved.size);
+    applyState(saved);
+  }
+
+  function optionRow(option, value) {
+    const row = document.createElement('label');
+    const name = document.createElement('span');
+    let input;
+    let out = null;
+    if (option.type === 'choice') {
+      row.className = 'field';
+      input = document.createElement('select');
+      for (const entry of option.values) {
+        const item = document.createElement('option');
+        item.value = entry.id;
+        input.append(item);
+      }
+      input.value = value;
+      row.append(name, input);
+    } else if (option.type === 'check') {
+      row.className = 'check';
+      input = document.createElement('input');
+      input.type = 'checkbox';
+      input.checked = value;
+      row.append(input, ' ', name);
+    } else {
+      row.className = 'slider';
+      const head = document.createElement('span');
+      out = document.createElement('output');
+      head.append(name, ': ', out);
+      input = document.createElement('input');
+      input.type = 'range';
+      input.min = String(option.min);
+      input.max = String(option.max);
+      input.step = String(option.type === 'count' ? 1 : option.step);
+      input.value = String(value);
+      row.append(head, input);
     }
-    if (Number.isFinite(saved.stretch)) ui.stretch.value = String(saved.stretch);
-    if (CAPS.includes(saved.caps)) ui.caps.value = saved.caps;
-    if (typeof saved.double === 'boolean') ui.double.checked = saved.double;
-    if (typeof saved.number === 'boolean') ui.number.checked = saved.number;
+    input.id = `gen-opt-${option.id}`;
+    input.addEventListener(option.type === 'range' || option.type === 'count' ? 'input' : 'change', () => {
+      const values = optionValues[ui.shape.value] || (optionValues[ui.shape.value] = {});
+      values[option.id] = option.type === 'check' ? input.checked : option.type === 'choice' ? input.value : Number(input.value);
+      onEdit();
+    });
+    return { option, row, name, input, out };
+  }
+
+  // The rows for the settings only the chosen shape has.
+  function buildOptionRows() {
+    const values = shapeOptions();
+    optionRows = (shapeById(ui.shape.value).options || []).map((option) => optionRow(option, values[option.id]));
+    ui.options.replaceChildren(...optionRows.map((entry) => entry.row));
+    nameOptions();
+  }
+
+  function nameOptions() {
+    for (const { option, name, input } of optionRows) {
+      name.textContent = t(option.labelKey);
+      if (option.type === 'choice') {
+        option.values.forEach((entry, i) => {
+          input.options[i].textContent = t(entry.key);
+        });
+      }
+    }
+  }
+
+  // Shows what each slider stands at and hides the rows that do not apply now.
+  function showOptions() {
+    const values = shapeOptions();
+    const plan = counts.length ? planDie(ui.shape.value, counts[0], ui.double.checked, values) : null;
+    for (const { option, row, out } of optionRows) {
+      row.hidden = Boolean(option.when) && Object.entries(option.when).some(([id, value]) => values[id] !== value);
+      if (!out) continue;
+      if (option.shows === 'split') out.textContent = plan && plan.split ? `${plan.split[0]} + ${plan.split[1]}` : '';
+      else if (option.type === 'count') out.textContent = String(values[option.id]);
+      else out.textContent = `×${values[option.id].toFixed(2)}`;
+    }
   }
 
   function sceneColor() {
@@ -242,11 +352,12 @@ export function createGenerator({ engine, onAdd }) {
   }
 
   function describe() {
+    if (state === 'counts' && editing) return t('gen.err.single', { min: MIN_OUTCOMES, max: MAX_OUTCOMES });
     if (state === 'counts') return t('gen.err.counts', { min: MIN_OUTCOMES, max: MAX_OUTCOMES, most: MAX_BATCH });
     if (state === 'wait') return t('gen.wait');
     if (state === 'failed') return t('gen.err.build');
     const shape = shapeById(ui.shape.value);
-    const plan = planDie(shape.id, counts[0], ui.double.checked);
+    const plan = planDie(shape.id, counts[0], ui.double.checked, shapeOptions());
     const lines = [];
     if (counts.length > 1) lines.push(t('gen.info.batch', { n: counts.length, first: counts[0] }));
     if (plan.faces === 2) lines.push(t('gen.info.coin'));
@@ -256,7 +367,8 @@ export function createGenerator({ engine, onAdd }) {
     if (plan.faces > 2) {
       if (shape.kind === 'roll') lines.push(t('gen.info.roll'));
       if (shape.kind === 'ends') lines.push(t('gen.info.ends'));
-      if (shape.lopsided) lines.push(t('gen.info.lopsided'));
+      if (plan.split) lines.push(t('gen.info.split', { a: plan.split[0], b: plan.split[1] }));
+      else if (shape.lopsided) lines.push(t('gen.info.lopsided'));
       else lines.push(t(plan.top ? 'gen.info.top' : 'gen.info.bottom'));
     }
     if (shape.awkward) lines.push(t('gen.info.awkward'));
@@ -296,9 +408,12 @@ export function createGenerator({ engine, onAdd }) {
     ui.stretchRow.hidden = !shape.stretch;
     ui.capsRow.hidden = !shape.caps;
     ui.stretchOut.textContent = `×${Number(ui.stretch.value).toFixed(2)}`;
-    const parsed = parseCounts(ui.counts.value);
+    let parsed = parseCounts(ui.counts.value);
+    // One die is being changed, so one count is all that fits.
+    if (editing && parsed && parsed.length > 1) parsed = null;
     counts = parsed || [];
     state = parsed ? (state === 'counts' ? 'ok' : state) : 'counts';
+    showOptions();
     showInfo();
     clearTimeout(timer);
     timer = setTimeout(preview, 120);
@@ -310,10 +425,37 @@ export function createGenerator({ engine, onAdd }) {
     view.renderer.render(view.scene, view.camera);
   }
 
-  function open() {
+  function showMode() {
+    ui.title.textContent = t(editing ? 'gen.titleEdit' : 'gen.title');
+    ui.add.textContent = t(editing ? 'gen.apply' : 'gen.add');
+    ui.countsLabel.textContent = t(editing ? 'gen.countsEdit' : 'gen.counts');
+    ui.note.hidden = !editing;
+    ui.note.textContent = editing ? t('gen.editNote', { name: editing.name }) : '';
+  }
+
+  // edit: { spec, number, name } opens the dialog on a die that is already on the scene.
+  function open(edit = null) {
     if (opened) return;
     if (!view) buildView();
     opened = true;
+    editing = null;
+    if (edit) {
+      formBefore = formState();
+      const { spec } = edit;
+      applyState({
+        shape: spec.shape,
+        counts: String(spec.outcomes),
+        size: spec.size,
+        stretch: spec.stretch,
+        caps: spec.caps,
+        double: Boolean(spec.double),
+        number: Boolean(edit.number),
+        options: { ...optionValues, [spec.shape]: spec.options },
+      });
+      editing = { name: edit.name };
+      view.moved = false;
+    }
+    showMode();
     ui.root.hidden = false;
     view.scene.background = sceneColor();
     view.resize();
@@ -330,6 +472,12 @@ export function createGenerator({ engine, onAdd }) {
     clearTimeout(timer);
     cancelAnimationFrame(frame);
     ui.root.hidden = true;
+    if (editing) {
+      // The form goes back to what the next new die was going to be.
+      editing = null;
+      applyState(formBefore);
+      formBefore = null;
+    }
   }
 
   function add() {
@@ -337,8 +485,10 @@ export function createGenerator({ engine, onAdd }) {
     saveSettings();
     const specs = counts.map(specFor);
     const number = ui.number.checked;
+    const apply = Boolean(editing);
     close();
-    onAdd(specs, number);
+    if (apply) onApply(specs[0], number);
+    else onAdd(specs, number);
   }
 
   const groups = GROUPS.map((group) => {
@@ -358,13 +508,14 @@ export function createGenerator({ engine, onAdd }) {
     for (const option of ui.shape.options) option.textContent = t(shapeById(option.value).nameKey);
   }
 
-  nameShapes();
-  loadSettings();
-
   const onEdit = () => {
     saveSettings();
     refresh();
   };
+
+  nameShapes();
+  loadSettings();
+
   ui.size.addEventListener('input', () => {
     ui.sizeNum.value = ui.size.value;
     onEdit();
@@ -373,7 +524,11 @@ export function createGenerator({ engine, onAdd }) {
     ui.size.value = String(sizeValue());
     onEdit();
   });
-  for (const input of [ui.shape, ui.caps, ui.double, ui.number]) input.addEventListener('change', onEdit);
+  ui.shape.addEventListener('change', () => {
+    buildOptionRows();
+    onEdit();
+  });
+  for (const input of [ui.caps, ui.double, ui.number]) input.addEventListener('change', onEdit);
   for (const input of [ui.counts, ui.stretch]) input.addEventListener('input', onEdit);
   ui.counts.addEventListener('keydown', (event) => {
     if (event.key === 'Enter') {
@@ -394,8 +549,12 @@ export function createGenerator({ engine, onAdd }) {
     // Called when the language or the theme changes.
     refresh() {
       nameShapes();
+      nameOptions();
       if (view) view.scene.background = sceneColor();
-      if (opened) showInfo();
+      if (opened) {
+        showMode();
+        showInfo();
+      }
     },
   };
 }

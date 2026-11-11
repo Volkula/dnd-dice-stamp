@@ -464,6 +464,10 @@ input[type="checkbox"] { accent-color: var(--accent); width: 16px; height: 16px;
 }
 
 .roll-controls .slider { margin-top: 0; }
+.roll-buttons { display: flex; gap: 8px; }
+.roll-stage canvas { touch-action: none; }
+.roll-stage.is-over-die canvas { cursor: grab; }
+.roll-stage.is-holding canvas { cursor: grabbing; }
 .roll-note { margin: 8px 14px 12px; }
 
 .gen-body {
@@ -482,6 +486,7 @@ input[type="checkbox"] { accent-color: var(--accent); width: 16px; height: 16px;
 }
 
 .gen-form .check { margin-top: 10px; }
+#gen-options:empty { display: none; }
 
 @media (max-width: 900px) {
   .gen-body { grid-template-columns: 1fr; grid-template-rows: minmax(180px, 38%) minmax(0, 1fr); }

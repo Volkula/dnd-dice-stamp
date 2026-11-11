@@ -3,7 +3,7 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { STLLoader } from 'three/addons/loaders/STLLoader.js';
 import { STLExporter } from 'three/addons/exporters/STLExporter.js';
 import { MeshBVH } from 'three-mesh-bvh';
-import { artworkFromSvg, fitContours } from './geom2d.js?v=8';
+import { artworkFromSvg, fitContours } from './geom2d.js?v=9';
 import {
   initManifold,
   localToolGeometry,
@@ -12,7 +12,7 @@ import {
   flipWinding,
   signedVolume,
   manifoldApi,
-} from './stamp.js?v=8';
+} from './stamp.js?v=9';
 import {
   LANGS,
   AppError,
@@ -25,8 +25,8 @@ import {
   onLangChange,
   applyI18n,
   locale,
-} from './i18n.js?v=8';
-import { cacheGet, cacheSet, cacheDel } from './store.js?v=8';
+} from './i18n.js?v=9';
+import { cacheGet, cacheSet, cacheDel } from './store.js?v=9';
 import {
   DEFAULT_FONT,
   EMOJI_CSS_FAMILY,
@@ -42,11 +42,11 @@ import {
   customFonts,
   needsEmoji,
   layoutText,
-} from './fonts.js?v=8';
-import { LIBRARIES, library, loadLibrary, searchItems } from './symbols.js?v=8';
-import { createRoller } from './roll.js?v=8';
-import { buildDie, fitHeight, shapeById } from './dicegen.js?v=8';
-import { createGenerator } from './genui.js?v=8';
+} from './fonts.js?v=9';
+import { LIBRARIES, library, loadLibrary, searchItems } from './symbols.js?v=9';
+import { createRoller } from './roll.js?v=9';
+import { buildDie, fitHeight, shapeById, optionsFor, SHAPES } from './dicegen.js?v=9';
+import { createGenerator } from './genui.js?v=9';
 import {
   PROJECT_APP,
   PROJECT_VERSION,
@@ -59,7 +59,7 @@ import {
   decodeGeometry,
   stampToData,
   stampFromData,
-} from './project.js?v=8';
+} from './project.js?v=9';
 
 const THEMES = ['midnight', 'day', 'contrast', 'sepia'];
 const THEME_KEY = 'dice.theme';
@@ -113,6 +113,7 @@ const ui = {
   smooth: $('smooth'),
   flip: $('btn-flip'),
   fit: $('btn-fit'),
+  regen: $('btn-regen'),
   tabText: $('tab-text'),
   tabSvg: $('tab-svg'),
   tabSymbols: $('tab-symbols'),
@@ -256,7 +257,7 @@ let objectSeq = 1;
 let busy = false;
 let exportDir = null;
 const canPickDir = typeof window.showDirectoryPicker === 'function';
-const generator = createGenerator({ engine: manifoldApi, onAdd: addGenerated });
+const generator = createGenerator({ engine: manifoldApi, onAdd: addGenerated, onApply: applyGenerated });
 
 // Shown texts are kept as message keys so a language switch can redraw them.
 const live = {
@@ -339,6 +340,8 @@ function syncButtons() {
   const any = objects.length > 0;
   ui.flip.disabled = !has || busy;
   ui.fit.disabled = !has || busy;
+  ui.regen.hidden = !has || !active.gen;
+  ui.regen.disabled = busy;
   ui.fitAll.disabled = !any || busy;
   ui.roll.disabled = !has || busy;
   ui.gen.disabled = busy;
@@ -467,6 +470,8 @@ function createObject(id, name, color) {
     refits: new Map(),
     // The search tree for signs that follow the relief, built on first use.
     relief: null,
+    // For a die made by the generator: { spec, number }, so its shape can be changed later.
+    gen: null,
   };
   mesh.userData.owner = obj;
   return obj;
@@ -700,6 +705,7 @@ function duplicateObject(obj) {
   copy.sourceSolid = obj.sourceSolid;
   copy.edited = obj.edited;
   copy.marks = obj.marks.map((mark) => ({ label: mark.label, normal: mark.normal.slice() }));
+  copy.gen = readGen(obj.gen);
   objects.splice(objects.indexOf(obj) + 1, 0, copy);
   setGeometry(copy, obj.mesh.geometry.clone(), obj.solid);
   copy.group.visible = obj.group.visible;
@@ -1463,6 +1469,94 @@ function numberStamps(obj, die) {
   for (const stamp of obj.stamps) rebuildPreview(obj, stamp);
 }
 
+function dieGeometry(die) {
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute('position', new THREE.BufferAttribute(die.positions, 3));
+  geometry.setIndex(new THREE.BufferAttribute(die.index, 1));
+  return geometry;
+}
+
+function dieName(spec, outcomes) {
+  return `d${outcomes} ${t(shapeById(spec.shape).shortKey)}`;
+}
+
+// What the generator was asked for, as kept with the object and in saved scenes. Null when unusable.
+function readGen(saved) {
+  const spec = saved && saved.spec;
+  if (!spec || typeof spec !== 'object' || !SHAPES.some((shape) => shape.id === spec.shape)) return null;
+  const outcomes = Math.round(Number(spec.outcomes));
+  const size = Number(spec.size);
+  if (!(outcomes >= 2) || !(size > 0)) return null;
+  return {
+    spec: {
+      shape: spec.shape,
+      outcomes,
+      double: Boolean(spec.double),
+      size,
+      stretch: Number(spec.stretch) || 1,
+      caps: String(spec.caps || ''),
+      options: optionsFor(spec.shape, spec.options),
+    },
+    number: Boolean(saved.number),
+  };
+}
+
+function openRegen() {
+  const obj = active;
+  if (!obj || !obj.gen || busy) return;
+  generator.open({ spec: obj.gen.spec, number: obj.gen.number, name: obj.name });
+}
+
+// Called by the generator dialog when it was opened on a die of the scene: builds the die anew in its place.
+async function applyGenerated(spec, number) {
+  const obj = active;
+  if (!obj || !obj.gen || busy) return;
+  try {
+    await enginePromise;
+  } catch {
+    return;
+  }
+  // Signs already cut into the model go with the old shape.
+  if (obj.edited && !window.confirm(t('model.regenConfirm', { name: obj.name }))) return;
+  setBusy(true, 'busy.generating', { n: 1 });
+  await nextPaint();
+  try {
+    let die;
+    try {
+      die = buildDie(manifoldApi(), spec);
+    } catch {
+      setStatus('err.generate');
+      return;
+    }
+    const made = solidify(dieGeometry(die), true);
+    const named = obj.name === dieName(obj.gen.spec, obj.gen.spec.outcomes);
+    clearStamps(obj);
+    clearHistory(obj);
+    obj.marks = [];
+    obj.source.dispose();
+    obj.source = made.geometry.clone();
+    obj.sourceSolid = made.solid;
+    obj.edited = false;
+    setGeometry(obj, made.geometry, made.solid);
+    obj.gen = readGen({ spec, number });
+    // A name the generator gave follows the new shape; a name typed by hand stays.
+    if (named) {
+      obj.name = '';
+      obj.name = uniqueName(dieName(spec, die.plan.outcomes));
+    }
+    if (number && fontReady && obj.solid) numberStamps(obj, die);
+  } finally {
+    setBusy(false);
+  }
+  layout();
+  activate(obj);
+  fitCamera();
+  saveModel(obj);
+  saveSource(obj);
+  saveSession();
+  setStatus('status.regenerated', { name: obj.name, stamps: obj.stamps.length });
+}
+
 // Called by the generator dialog with one spec per die.
 async function addGenerated(specs, number) {
   try {
@@ -1484,10 +1578,8 @@ async function addGenerated(specs, number) {
         failed += 1;
         continue;
       }
-      const geometry = new THREE.BufferGeometry();
-      geometry.setAttribute('position', new THREE.BufferAttribute(die.positions, 3));
-      geometry.setIndex(new THREE.BufferAttribute(die.index, 1));
-      const { obj } = addObject(geometry, `d${die.plan.outcomes} ${t(shapeById(spec.shape).shortKey)}`);
+      const { obj } = addObject(dieGeometry(die), dieName(spec, die.plan.outcomes));
+      obj.gen = readGen({ spec, number });
       if (number && fontReady && obj.solid) numberStamps(obj, die);
       made.push(obj);
     }
@@ -1902,6 +1994,7 @@ function objectData(obj) {
     selectedId: obj.selectedId,
     stamps: obj.stamps.map(stampToData),
     marks: obj.marks.map((mark) => ({ label: mark.label, normal: mark.normal.slice() })),
+    gen: obj.gen,
   };
 }
 
@@ -2047,6 +2140,7 @@ function applyScene(data) {
     setGeometry(obj, part.geometry, meta.solid !== false);
     obj.group.visible = meta.visible !== false;
     obj.marks = readMarks(meta.marks);
+    obj.gen = readGen(meta.gen);
 
     const used = new Set();
     for (const saved of Array.isArray(meta.stamps) ? meta.stamps : []) {
@@ -2458,6 +2552,7 @@ ui.gen.addEventListener('click', () => {
 });
 ui.flip.addEventListener('click', flipActive);
 ui.fit.addEventListener('click', fitCamera);
+ui.regen.addEventListener('click', openRegen);
 ui.fitAll.addEventListener('click', fitScene);
 ui.tabText.addEventListener('click', () => setPane('text'));
 ui.tabSvg.addEventListener('click', () => setPane('svg'));

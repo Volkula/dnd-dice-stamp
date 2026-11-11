@@ -12,7 +12,7 @@
       document.documentElement.dataset.theme = themes.indexOf(saved) >= 0 ? saved : 'midnight';
     })();
   </script>
-  <link rel="stylesheet" href="./styles.css?v=8">
+  <link rel="stylesheet" href="./styles.css?v=9">
   <script type="importmap">
   {
     "imports": {
@@ -105,7 +105,10 @@
             <label class="check"><input id="smooth" type="checkbox"> <span data-i18n="model.smooth">Сгладить</span></label>
             <button id="btn-flip" type="button" class="ghost" data-i18n="model.flip" disabled>Вывернуть нормали</button>
           </div>
-          <button id="btn-fit" type="button" class="ghost" data-i18n="model.fit" disabled>Вписать в кадр</button>
+          <div class="row">
+            <button id="btn-fit" type="button" class="ghost" data-i18n="model.fit" disabled>Вписать в кадр</button>
+            <button id="btn-regen" type="button" data-i18n="model.regen" hidden>Изменить форму…</button>
+          </div>
         </section>
 
         <section>
@@ -265,7 +268,10 @@
         <label class="slider"><span><span data-i18n="roll.weight">Вес</span>: <output id="roll-weight-out"></output></span>
           <input id="roll-weight" type="range" step="1">
         </label>
-        <button id="roll-throw" type="button" class="primary" data-i18n="roll.throw">Бросить</button>
+        <div class="roll-buttons">
+          <button id="roll-throw" type="button" class="primary" data-i18n="roll.throw">Бросить</button>
+          <button id="roll-tower" type="button" data-i18n="roll.tower">Через башню</button>
+        </div>
       </div>
       <p class="muted roll-note" data-i18n="roll.note">Кубы сталкиваются по выпуклой оболочке модели. Вес не меняет притяжение, поэтому он показан иначе: тяжёлый куб летит медленнее и меньше скачет. Выпавшее читается по знаку, который смотрит вверх.</p>
     </div>
@@ -283,7 +289,7 @@
           <label class="field"><span data-i18n="gen.shape">Форма</span>
             <select id="gen-shape"></select>
           </label>
-          <label class="field"><span data-i18n="gen.counts">Сколько граней. Можно несколько чисел сразу</span>
+          <label class="field"><span id="gen-counts-label" data-i18n="gen.counts">Сколько граней. Можно несколько чисел сразу</span>
             <input id="gen-counts" type="text" inputmode="numeric" spellcheck="false" autocomplete="off" value="3, 5, 7, 23, 30">
           </label>
           <label class="slider"><span data-i18n="gen.size">Размер, мм — наибольший габарит</span>
@@ -302,9 +308,11 @@
               <option value="flat" data-i18n="gen.caps.flat">Плоские</option>
             </select>
           </label>
+          <div id="gen-options"></div>
           <label class="check"><input id="gen-double" type="checkbox"> <span data-i18n="gen.double">Каждое число на двух противоположных гранях</span></label>
           <label class="check"><input id="gen-number" type="checkbox" checked> <span data-i18n="gen.number">Сразу поставить числа на грани</span></label>
           <p id="gen-info" class="muted"></p>
+          <p id="gen-note" class="muted" hidden></p>
           <div class="actions">
             <button id="gen-add" type="button" class="primary" data-i18n="gen.add">Добавить на сцену</button>
           </div>
@@ -313,7 +321,7 @@
     </div>
   </div>
 
-  <script type="module" src="./app.js?v=8"></script>
+  <script type="module" src="./app.js?v=9"></script>
   <script>
     setTimeout(function () {
       if (window.__diceApp) return;

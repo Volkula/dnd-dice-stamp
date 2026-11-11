@@ -1,17 +1,23 @@
-// Dice tray: throws copies of the current die with rigid-body physics.
+// Dice tray: throws copies of the current die with rigid-body physics, across the tray,
+// through a dice tower that stands next to it, or one die at a time by hand.
 // Lengths are centimetres, so a 16 mm die is 1.6 units and gravity is 981.
 
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
-import { t } from './i18n.js?v=8';
+import { t } from './i18n.js?v=9';
 
 const RAPIER_URL = 'https://cdn.jsdelivr.net/npm/@dimforge/rapier3d-compat@0.14.0/rapier.es.js';
 const STEP = 1 / 240;
 const MAX_STEPS_PER_FRAME = 12;
+// How stiff a contact is. The engine's own 30 Hz is tuned for metres: under a gravity of 981 a
+// die at rest sinks a quarter of a millimetre into the felt, and that is as much as parts two
+// faces a few degrees apart, so such a die would stop between them.
+const CONTACT_HZ = 180;
 const GRAVITY = 981;
-const TIMEOUT = 6;
-// Seconds of free tumbling before the dice are braked harder.
-const CALM_AFTER = 2.5;
+// Seconds after which a throw is read whatever the dice are doing, and seconds of free tumbling
+// before the dice are braked harder. The way down a tower takes longer than a throw across the tray.
+const TIMEOUT = { tray: 6, tower: 16, hand: 8 };
+const CALM_AFTER = { tray: 2.5, tower: 7, hand: 3 };
 // Dice count as stopped when all of them stay under these speeds (cm/s, rad/s) for this long (s).
 const QUIET_SPEED = 2;
 const QUIET_SPIN = 0.6;
@@ -20,7 +26,19 @@ const QUIET_TIME = 0.35;
 const EDGE_MARGIN = 0.0015;
 // How much more squarely a blank face may look up than the sign that is read.
 const TILT = 0.12;
-const TRAY = { width: 30, depth: 20, wall: 4, thick: 1.2, sky: 70 };
+// Two different signs this close to looking up equally mean the die leans on an edge between them.
+// A die whose faces are closer to each other than that gets a tighter measure: see tieOf.
+const TIE = 0.02;
+const TRAY = { width: 30, depth: 20, wall: 4, thick: 1.2, sky: 90 };
+// The dice tower: the slope of its two baffles and of the chute, the thickness of their boards,
+// and the seconds between two dice dropped into it.
+const TOWER = { slope: 0.6, chute: 0.5, board: 0.5, pause: 0.22 };
+// A die held by hand: how hard it is pulled to the pointer, its top speed, cm/s,
+// and how high over the tray walls it is carried.
+// A die caught between two faces: how fast it is turned towards the nearer one (rad/s), how
+// many times in a throw, and the seconds it gets to lie down after that.
+const NUDGE = { spin: 1.6, most: 3, time: 1.5 };
+const HAND = { pull: 14, fastest: 260, lift: 2.5 };
 const VIEW_DIRECTION = new THREE.Vector3(0, -34, 32).normalize();
 const SETTINGS_KEY = 'dice.roll';
 const LIMITS = {
@@ -136,6 +154,87 @@ function flatNormals(geometry) {
   return out;
 }
 
+// Where everything in the tower is, for dice whose bounding ball has the given radius.
+// The tower stands outside the left wall of the tray; its chute comes out over that wall.
+// How close to equally up two different signs must look to call the die undecided: half of what
+// parts the two nearest faces. On a die with two bands of facets the band that lies flat shows
+// its facet only a few degrees more squarely than the nearest facet of the other band.
+function tieOf(marks) {
+  let nearest = -1;
+  for (let i = 0; i < marks.length; i++) {
+    for (let j = i + 1; j < marks.length; j++) {
+      if (marks[i].label === marks[j].label) continue;
+      const dot = marks[i].normal.dot(marks[j].normal);
+      if (dot < 0.999 && dot > nearest) nearest = dot;
+    }
+  }
+  return Math.min(TIE, (1 - nearest) / 2);
+}
+
+function towerLayout(radius) {
+  // The room a die needs to pass a baffle.
+  const gap = Math.max(4.2, radius * 2 + 1.4);
+  const reach = gap * 1.3;
+  const depth = Math.max(8, gap * 2);
+  const front = -TRAY.width / 2 - TRAY.thick;
+  const back = front - gap - reach;
+  const mouth = -TRAY.width / 2 + 1.5;
+  const lip = TRAY.wall + 0.6;
+  const chuteAt = (x) => lip + (mouth - x) * TOWER.chute;
+  const opening = chuteAt(front) + gap + 0.5;
+  const lowB = Math.max(chuteAt(front - reach) + gap + 0.5, opening + 0.3 - reach * TOWER.slope);
+  const highB = lowB + reach * TOWER.slope;
+  const lowA = highB - gap * TOWER.slope + gap + 0.5;
+  const highA = lowA + reach * TOWER.slope;
+  return {
+    gap,
+    reach,
+    depth,
+    front,
+    back,
+    opening,
+    top: highA + gap * 0.5 + 1,
+    // The surface of each board as [x, z] at its free end and at the wall it hangs on:
+    // a baffle from the back wall, one from the front wall, and the chute.
+    ramps: [
+      [[back + reach, lowA], [back, highA]],
+      [[front - reach, lowB], [front, highB]],
+      [[mouth, lip], [back, chuteAt(back)]],
+    ],
+  };
+}
+
+// A board of the tower as a box: its centre, size and turn about the y axis.
+function boardBox([free, hung], depth) {
+  const dx = hung[0] - free[0];
+  const dz = hung[1] - free[1];
+  const run = Math.hypot(dx, dz);
+  const ux = dx / run;
+  const uz = dz / run;
+  // The board goes a little way into the wall it hangs on, and lies under its surface line.
+  const length = run + 0.6;
+  const down = ux > 0 ? [uz, -ux] : [-uz, ux];
+  const angle = Math.atan2(-uz, ux);
+  return {
+    x: (free[0] + hung[0]) / 2 + ux * 0.3 + (down[0] * TOWER.board) / 2,
+    z: (free[1] + hung[1]) / 2 + uz * 0.3 + (down[1] * TOWER.board) / 2,
+    size: [length, depth, TOWER.board],
+    turn: { x: 0, y: Math.sin(angle / 2), z: 0, w: Math.cos(angle / 2) },
+  };
+}
+
+// The walls of the tower as boxes [x0, x1, y0, y1, z0, z1]. The front one starts over the opening.
+function towerWalls(layout) {
+  const side = layout.depth / 2;
+  const t = TRAY.thick;
+  return [
+    [layout.back - t, layout.back, -side - t, side + t, 0, layout.top],
+    [layout.back, layout.front + t, side, side + t, 0, layout.top],
+    [layout.back, layout.front + t, -side - t, -side, 0, layout.top],
+    [layout.front, layout.front + t, -side, side, layout.opening, layout.top],
+  ];
+}
+
 function numberOf(label) {
   const match = /^\s*(-?\d+(?:[.,]\d+)?)\.?\s*$/.exec(label);
   return match ? Number(match[1].replace(',', '.')) : null;
@@ -149,6 +248,7 @@ export function createRoller() {
     result: $('roll-result'),
     close: $('roll-close'),
     again: $('roll-throw'),
+    tower: $('roll-tower'),
     count: $('roll-count'),
     size: $('roll-size'),
     weight: $('roll-weight'),
@@ -168,12 +268,20 @@ export function createRoller() {
   let material = null;
   let marks = [];
   let flats = [];
+  let tie = TIE;
   let frame = 0;
   let last = 0;
   let carry = 0;
   let elapsed = 0;
   let quiet = 0;
   let calmed = false;
+  // How the dice were last set going: 'tray', 'tower' or 'hand'.
+  let way = 'tray';
+  // The tower as it stands now, sized for the dice of the last throw.
+  let tower = towerLayout(1);
+  // The die carried by the pointer: { die, target, trail }.
+  let held = null;
+  let dieRadius = 1;
   // True once every die is asleep: the physics stops stepping until the next throw.
   let resting = true;
   // 'idle' | 'loading' | 'rolling' | 'done' | 'failed'
@@ -193,9 +301,10 @@ export function createRoller() {
     const sun = new THREE.DirectionalLight(0xfff8ee, 1.6);
     sun.position.set(-14, -18, 40);
     sun.castShadow = true;
-    sun.shadow.mapSize.set(1024, 1024);
+    sun.shadow.mapSize.set(2048, 2048);
+    // Wide enough on the left for the tower as well.
     const reach = TRAY.width * 0.8;
-    Object.assign(sun.shadow.camera, { left: -reach, right: reach, top: reach, bottom: -reach, near: 1, far: 120 });
+    Object.assign(sun.shadow.camera, { left: -reach * 2, right: reach, top: reach * 1.3, bottom: -reach * 1.3, near: 1, far: 160 });
     sun.shadow.bias = -0.0005;
     scene.add(sun);
 
@@ -244,35 +353,49 @@ export function createRoller() {
       view.moved = true;
     });
 
-    const corners = [];
-    for (const x of [-1, 1]) {
-      for (const y of [-1, 1]) {
-        for (const z of [-0.6, TRAY.wall]) {
-          corners.push(new THREE.Vector3(x * (TRAY.width / 2 + TRAY.thick), y * (TRAY.depth / 2 + TRAY.thick), z));
-        }
+    const towerGroup = new THREE.Group();
+    scene.add(towerGroup);
+    const glass = new THREE.MeshStandardMaterial({ color: 0xbfd6e2, roughness: 0.2, transparent: true, opacity: 0.16, depthWrite: false });
+    const rim = new THREE.LineBasicMaterial({ color: 0x6b4a2c });
+
+    // The corners of the tray and of the tower: all of them must be in view.
+    const corners = () => {
+      const out = [];
+      const far = TRAY.depth / 2 + TRAY.thick;
+      for (const y of [-far, far]) {
+        out.push(new THREE.Vector3(TRAY.width / 2 + TRAY.thick, y, -0.6), new THREE.Vector3(TRAY.width / 2 + TRAY.thick, y, TRAY.wall));
+        out.push(new THREE.Vector3(-TRAY.width / 2 - TRAY.thick, y, -0.6));
       }
-    }
+      const side = tower.depth / 2 + TRAY.thick;
+      for (const y of [-side, side]) {
+        out.push(new THREE.Vector3(tower.back - TRAY.thick, y, 0), new THREE.Vector3(tower.back - TRAY.thick, y, tower.top));
+        out.push(new THREE.Vector3(tower.front + TRAY.thick, y, tower.top));
+      }
+      return out;
+    };
     const probe = new THREE.Vector3();
-    const fitsAt = (distance) => {
+    const fitsAt = (distance, points) => {
       camera.position.copy(controls.target).addScaledVector(VIEW_DIRECTION, distance);
       camera.lookAt(controls.target);
       camera.updateMatrixWorld();
-      return corners.every((corner) => {
+      return points.every((corner) => {
         probe.copy(corner).project(camera);
         return Math.abs(probe.x) <= 0.94 && Math.abs(probe.y) <= 0.94 && probe.z < 1;
       });
     };
 
-    // Backs the camera off until the whole tray is in view, whatever the shape of the window.
+    // Backs the camera off until the tray and the tower are in view, whatever the shape of the window.
     const frame = () => {
+      const points = corners();
+      controls.target.set((tower.back - TRAY.thick + TRAY.width / 2 + TRAY.thick) / 2, 0, Math.min(6, tower.top / 4));
       let near = controls.minDistance;
       let far = controls.maxDistance;
       for (let i = 0; i < 20; i++) {
         const middle = (near + far) / 2;
-        if (fitsAt(middle)) far = middle;
+        if (fitsAt(middle, points)) far = middle;
         else near = middle;
       }
-      fitsAt(far);
+      fitsAt(far, points);
       controls.update();
     };
 
@@ -285,7 +408,7 @@ export function createRoller() {
       renderer.setSize(width, height, false);
       if (!view.moved) frame();
     };
-    view = { scene, camera, renderer, controls, resize, frame, moved: false };
+    view = { scene, camera, renderer, controls, resize, frame, moved: false, towerGroup, glass, rim, wood };
     new ResizeObserver(resize).observe(ui.stage);
   }
 
@@ -329,7 +452,35 @@ export function createRoller() {
     }
   }
 
+  // Rebuilds the tower on screen: glass walls with their edges drawn, wooden boards inside.
+  function showTower() {
+    const group = view.towerGroup;
+    for (const child of [...group.children]) {
+      group.remove(child);
+      child.geometry.dispose();
+    }
+    for (const [x0, x1, y0, y1, z0, z1] of towerWalls(tower)) {
+      const box = new THREE.BoxGeometry(x1 - x0, y1 - y0, z1 - z0);
+      const wall = new THREE.Mesh(box, view.glass);
+      wall.position.set((x0 + x1) / 2, (y0 + y1) / 2, (z0 + z1) / 2);
+      wall.renderOrder = 2;
+      const edges = new THREE.LineSegments(new THREE.EdgesGeometry(box), view.rim);
+      edges.position.copy(wall.position);
+      group.add(wall, edges);
+    }
+    for (const ramp of tower.ramps) {
+      const box = boardBox(ramp, tower.depth);
+      const board = new THREE.Mesh(new THREE.BoxGeometry(...box.size), view.wood);
+      board.position.set(box.x, 0, box.z);
+      board.quaternion.set(box.turn.x, box.turn.y, box.turn.z, box.turn.w);
+      board.castShadow = true;
+      board.receiveShadow = true;
+      group.add(board);
+    }
+  }
+
   function clearWorld() {
+    letGo();
     for (const die of dice) view.scene.remove(die.mesh);
     dice = [];
     if (world) {
@@ -348,24 +499,54 @@ export function createRoller() {
     );
   }
 
+  // A box given by its corners rather than by its middle.
+  function addBlock(x0, x1, y0, y1, z0, z1) {
+    addBox((x1 - x0) / 2, (y1 - y0) / 2, (z1 - z0) / 2, (x0 + x1) / 2, (y0 + y1) / 2, (z0 + z1) / 2);
+  }
+
+  // The felt, an unseen lid and unseen walls that go up from the tray's own, so no die leaves.
+  // On the left they make way for the tower: a die may fly or be carried into its open top.
   function buildTray() {
     const { width, depth, sky } = TRAY;
     const hw = width / 2;
     const hd = depth / 2;
-    addBox(hw + 2, hd + 2, 1, 0, 0, -1);
-    addBox(hw + 2, hd + 2, 1, 0, 0, sky + 1);
-    addBox(1, hd + 2, sky / 2, hw + 1, 0, sky / 2);
-    addBox(1, hd + 2, sky / 2, -hw - 1, 0, sky / 2);
-    addBox(hw + 2, 1, sky / 2, 0, hd + 1, sky / 2);
-    addBox(hw + 2, 1, sky / 2, 0, -hd - 1, sky / 2);
+    const side = tower.depth / 2 + TRAY.thick;
+    const behind = tower.back - TRAY.thick;
+    addBlock(behind - 2, hw + 2, -hd - 2, hd + 2, -2, 0);
+    addBlock(behind - 2, hw + 2, -hd - 2, hd + 2, sky, sky + 2);
+    addBlock(hw, hw + 2, -hd - 2, hd + 2, 0, sky);
+    addBlock(-hw - 2, hw + 2, hd, hd + 2, 0, sky);
+    addBlock(-hw - 2, hw + 2, -hd - 2, -hd, 0, sky);
+    addBlock(-hw - 2, -hw, side, hd + 2, 0, sky);
+    addBlock(-hw - 2, -hw, -hd - 2, -side, 0, sky);
+    // The tray's own left wall under the chute.
+    addBlock(-hw - TRAY.thick, -hw, -side, side, 0, TRAY.wall);
   }
 
-  function throwDice() {
+  // The tower: its back and side walls go on up unseen, the front one ends at its top.
+  function buildTower() {
+    towerWalls(tower).forEach(([x0, x1, y0, y1, z0, z1], i) => {
+      addBlock(x0, x1, y0, y1, z0, i === 3 ? z1 : TRAY.sky);
+    });
+    for (const ramp of tower.ramps) {
+      const box = boardBox(ramp, tower.depth + TRAY.thick);
+      world.createCollider(
+        rapier.ColliderDesc.cuboid(box.size[0] / 2, box.size[1] / 2, box.size[2] / 2)
+          .setTranslation(box.x, 0, box.z)
+          .setRotation(box.turn)
+          .setRestitution(0.3)
+          .setFriction(0.1),
+      );
+    }
+  }
+
+  // through: 'tray' sends the dice across the felt, 'tower' drops them into the tower one by one.
+  function throwDice(through = 'tray') {
     if (!rapier || !base || !opened) return;
     clearWorld();
     world = new rapier.World({ x: 0, y: 0, z: -GRAVITY });
     world.timestep = STEP;
-    buildTray();
+    world.integrationParameters.contact_natural_frequency = CONTACT_HZ;
 
     const edge = settings.size / 10;
     const k = edge / baseSize;
@@ -373,6 +554,18 @@ export function createRoller() {
     const points = hullPoints(scaled.getAttribute('position').array);
     scaled.computeBoundingSphere();
     const radius = scaled.boundingSphere.radius;
+    dieRadius = radius;
+
+    // The tower is as roomy as these dice need.
+    const next = towerLayout(radius);
+    const changed = next.gap !== tower.gap || !view.towerGroup.children.length;
+    tower = next;
+    if (changed) {
+      showTower();
+      if (!view.moved) view.frame();
+    }
+    buildTray();
+    buildTower();
 
     // The slider cannot change how gravity pulls, so weight shows as a slower, deader throw.
     const heft = (settings.weight - LIMITS.weight[0]) / (LIMITS.weight[1] - LIMITS.weight[0]);
@@ -384,21 +577,30 @@ export function createRoller() {
     const columns = Math.max(1, Math.min(settings.count, 3, Math.floor(room / gap) + 1));
     const rand = (min, max) => min + Math.random() * (max - min);
 
+    // Over the upper baffle, clear of the tower's walls.
+    const drop = Math.max(0, tower.depth / 2 - radius - 0.4);
     for (let i = 0; i < settings.count; i++) {
       const column = i % columns;
       const layer = Math.floor(i / columns);
-      const x = -TRAY.width / 2 + radius + 1.5 + rand(0, 1);
-      const y = (column - (columns - 1) / 2) * gap + rand(-0.3, 0.3);
-      const z = 7 + radius + layer * gap;
+      let at;
+      let push;
+      if (through === 'tower') {
+        at = [tower.back + Math.max(radius + 0.3, tower.reach * 0.4) + rand(-0.3, 0.3), rand(-drop, drop), tower.top + radius + 1];
+        push = [rand(-8, 8), rand(-12, 12), rand(-30, 0)];
+      } else {
+        // The start is clear of the end of the chute.
+        at = [-TRAY.width / 2 + radius + 3.5 + rand(0, 1), (column - (columns - 1) / 2) * gap + rand(-0.3, 0.3), 7 + radius + layer * gap];
+        push = [rand(65, 135) * speed, rand(-45, 45) * speed, rand(-20, 20)];
+      }
       const turn = new THREE.Quaternion().setFromEuler(
         new THREE.Euler(rand(0, Math.PI * 2), rand(0, Math.PI * 2), rand(0, Math.PI * 2)),
       );
       const spin = new THREE.Vector3(rand(-1, 1), rand(-1, 1), rand(-1, 1)).normalize().multiplyScalar(rand(14, 30) * speed);
       const body = world.createRigidBody(
         rapier.RigidBodyDesc.dynamic()
-          .setTranslation(x, y, z)
+          .setTranslation(at[0], at[1], at[2])
           .setRotation({ x: turn.x, y: turn.y, z: turn.z, w: turn.w })
-          .setLinvel(rand(65, 135) * speed, rand(-45, 45) * speed, rand(-20, 20))
+          .setLinvel(push[0], push[1], push[2])
           .setAngvel({ x: spin.x, y: spin.y, z: spin.z })
           .setLinearDamping(0.1)
           .setAngularDamping(0.15)
@@ -410,18 +612,181 @@ export function createRoller() {
       mesh.castShadow = true;
       mesh.receiveShadow = true;
       view.scene.add(mesh);
-      dice.push({ body, mesh });
+      // Dice go into the tower one after another; each waits for its turn out of sight.
+      const startAt = through === 'tower' ? i * TOWER.pause : 0;
+      if (startAt > 0) {
+        body.setEnabled(false);
+        mesh.visible = false;
+      }
+      dice.push({ body, mesh, startAt, started: startAt === 0, nudges: 0 });
     }
 
+    setGoing(through);
+    labels = [];
+    syncMeshes();
+    showResult();
+  }
+
+  // Starts the clock of a throw: the dice tumble freely again and are read once they stop.
+  function setGoing(how) {
+    way = how;
     carry = 0;
     elapsed = 0;
     quiet = 0;
-    calmed = false;
     resting = false;
-    labels = [];
     phase = 'rolling';
-    syncMeshes();
+    for (const die of dice) die.nudges = 0;
+    if (calmed) {
+      for (const die of dice) {
+        die.body.setLinearDamping(0.1);
+        die.body.setAngularDamping(0.15);
+      }
+    }
+    calmed = false;
+  }
+
+  // ---- A die in the hand ----
+
+  const ray = new THREE.Raycaster();
+  const ndc = new THREE.Vector2();
+  const spot = new THREE.Vector3();
+
+  function aimRay(event) {
+    const rect = view.renderer.domElement.getBoundingClientRect();
+    ndc.set(((event.clientX - rect.left) / rect.width) * 2 - 1, -((event.clientY - rect.top) / rect.height) * 2 + 1);
+    ray.setFromCamera(ndc, view.camera);
+    return ray.ray;
+  }
+
+  // The die under the pointer, judged by its bounding ball: quick even for a dense model.
+  function dieAt(event) {
+    if (!world || !dice.length) return null;
+    const line = aimRay(event);
+    let best = null;
+    let nearest = Infinity;
+    for (const die of dice) {
+      if (!die.started) continue;
+      const along = spot.copy(die.mesh.position).sub(line.origin).dot(line.direction);
+      if (along <= 0 || along >= nearest) continue;
+      if (line.distanceSqToPoint(die.mesh.position) > dieRadius * dieRadius) continue;
+      best = die;
+      nearest = along;
+    }
+    return best;
+  }
+
+  // How high a held die is carried: just over the tray's walls, and over the tower near it.
+  function carryHeight(x) {
+    const low = TRAY.wall + dieRadius + HAND.lift;
+    const high = tower.top + dieRadius + 1.5;
+    const from = tower.front + TRAY.thick + 2 * dieRadius + 4;
+    const share = Math.min(1, Math.max(0, (from - x) / 4));
+    return low + (high - low) * share * share * (3 - 2 * share);
+  }
+
+  // Where the pointer wants the held die: on the carrying surface, inside the tray or over the tower.
+  function carryTo(event, target) {
+    const line = aimRay(event);
+    if (Math.abs(line.direction.z) < 1e-3) return;
+    let height = carryHeight(target.x);
+    for (let i = 0; i < 4; i++) {
+      const reach = (height - line.origin.z) / line.direction.z;
+      if (reach <= 0) return;
+      spot.copy(line.origin).addScaledVector(line.direction, reach);
+      height = carryHeight(spot.x);
+    }
+    const room = dieRadius + 0.2;
+    const overTower = spot.x < tower.front + TRAY.thick + room;
+    const side = (overTower ? tower.depth / 2 : TRAY.depth / 2) - room;
+    target.set(
+      Math.min(TRAY.width / 2 - room, Math.max(tower.back + room, spot.x)),
+      Math.min(side, Math.max(-side, spot.y)),
+      height,
+    );
+  }
+
+  function grab(die, event) {
+    letGo();
+    const p = die.body.translation();
+    held = { die, target: new THREE.Vector3(p.x, p.y, p.z), trail: [] };
+    carryTo(event, held.target);
+    die.body.setGravityScale(0, true);
+    die.body.setAngularDamping(3);
+    die.body.setLinearDamping(0.1);
+    view.controls.enabled = false;
+    ui.stage.classList.add('is-holding');
+    setGoing('hand');
+    labels = [];
     showResult();
+    window.addEventListener('pointermove', onHandMove);
+    window.addEventListener('pointerup', onHandUp);
+    window.addEventListener('pointercancel', onHandUp);
+  }
+
+  function onHandMove(event) {
+    if (!held) return;
+    carryTo(event, held.target);
+    const now = performance.now();
+    held.trail.push({ at: now, x: held.target.x, y: held.target.y, z: held.target.z });
+    while (held.trail.length > 2 && now - held.trail[0].at > 120) held.trail.shift();
+  }
+
+  // Pulls the held die towards the pointer. Called before every frame of physics.
+  function carryHeld() {
+    const { die, target } = held;
+    const p = die.body.translation();
+    spot.set(target.x - p.x, target.y - p.y, target.z - p.z).multiplyScalar(HAND.pull);
+    if (spot.length() > HAND.fastest) spot.setLength(HAND.fastest);
+    die.body.setLinvel({ x: spot.x, y: spot.y, z: spot.z }, true);
+    // The clock of the throw starts when the die leaves the hand.
+    elapsed = 0;
+    quiet = 0;
+  }
+
+  // Lets the held die go. thrown: it flies on the way the pointer was moving, and spins.
+  function letGo(thrown = false) {
+    if (!held) return;
+    const { die, trail } = held;
+    held = null;
+    window.removeEventListener('pointermove', onHandMove);
+    window.removeEventListener('pointerup', onHandUp);
+    window.removeEventListener('pointercancel', onHandUp);
+    view.controls.enabled = true;
+    ui.stage.classList.remove('is-holding');
+    if (!thrown || !world) return;
+    die.body.setGravityScale(1, true);
+    die.body.setAngularDamping(0.15);
+    const first = trail[0];
+    const last = trail[trail.length - 1];
+    const span = first && last ? (last.at - first.at) / 1000 : 0;
+    // A pointer that stood still before the release means a drop, not a throw.
+    const fresh = last && performance.now() - last.at < 80 && span > 0.01;
+    spot.set(0, 0, 0);
+    if (fresh) spot.set(last.x - first.x, last.y - first.y, last.z - first.z).divideScalar(span);
+    if (spot.length() > HAND.fastest) spot.setLength(HAND.fastest);
+    die.body.setLinvel({ x: spot.x, y: spot.y, z: spot.z }, true);
+    const turn = 10 + spot.length() / 9;
+    const spin = new THREE.Vector3(Math.random() - 0.5, Math.random() - 0.5, Math.random() - 0.5).normalize().multiplyScalar(turn);
+    die.body.setAngvel({ x: spin.x, y: spin.y, z: spin.z }, true);
+    setGoing('hand');
+  }
+
+  function onHandUp() {
+    letGo(true);
+  }
+
+  function onStageDown(event) {
+    if (event.button !== 0 || phase === 'loading' || phase === 'failed') return;
+    const die = dieAt(event);
+    if (!die) return;
+    // The camera must not turn while a die is carried.
+    event.preventDefault();
+    event.stopPropagation();
+    grab(die, event);
+  }
+
+  function onStageHover(event) {
+    if (!held) ui.stage.classList.toggle('is-over-die', Boolean(dieAt(event)));
   }
 
   function syncMeshes() {
@@ -436,7 +801,8 @@ export function createRoller() {
   const up = new THREE.Vector3();
   const turnBack = new THREE.Quaternion();
 
-  function faceUp(die) {
+  // between: an object that gets the sign nearest to the top when the die hangs between two faces.
+  function faceUp(die, between) {
     const r = die.body.rotation();
     up.set(0, 0, 1).applyQuaternion(turnBack.set(r.x, r.y, r.z, r.w).invert());
     let top = null;
@@ -471,7 +837,10 @@ export function createRoller() {
       if (topDot <= 0.6 || topDot < flatTop - TILT) return null;
       // Two different faces equally close to the top: the die sits on an edge between them.
       for (const mark of marks) {
-        if (mark.label !== top.label && mark.normal.dot(up) > topDot - 0.02 && mark.normal.dot(top.normal) < 0.999) return null;
+        if (mark.label !== top.label && mark.normal.dot(up) > topDot - tie && mark.normal.dot(top.normal) < 0.999) {
+          if (between) between.top = top;
+          return null;
+        }
       }
       return top.label;
     }
@@ -482,7 +851,9 @@ export function createRoller() {
   }
 
   function quietNow() {
-    for (const { body } of dice) {
+    if (held) return false;
+    for (const { body, started } of dice) {
+      if (!started) return false;
       const v = body.linvel();
       const w = body.angvel();
       if (v.x * v.x + v.y * v.y + v.z * v.z > QUIET_SPEED * QUIET_SPEED) return false;
@@ -491,9 +862,35 @@ export function createRoller() {
     return true;
   }
 
+  const between = { top: null };
+  const lean = new THREE.Vector3();
+
+  // A die with faces a few degrees apart may stop half-way over the ridge between two of them:
+  // it tips so slowly there that the damping which calms round dice holds it. Such a die gets
+  // a light push towards the face that is nearer to the top. Returns true when any was pushed.
+  function settleBetween() {
+    let pushed = false;
+    for (const die of dice) {
+      if (!die.started || die.nudges >= NUDGE.most || (held && held.die === die)) continue;
+      const w = die.body.angvel();
+      if (w.x * w.x + w.y * w.y + w.z * w.z > NUDGE.spin * NUDGE.spin * 0.25) continue;
+      between.top = null;
+      if (faceUp(die, between) !== null || !between.top) continue;
+      const r = die.body.rotation();
+      lean.copy(between.top.normal).applyQuaternion(turnBack.set(r.x, r.y, r.z, r.w)).cross(up.set(0, 0, 1));
+      if (lean.lengthSq() < 1e-10) continue;
+      lean.setLength(NUDGE.spin);
+      die.body.setAngularDamping(0.15);
+      die.body.setAngvel({ x: lean.x, y: lean.y, z: lean.z }, true);
+      die.nudges += 1;
+      pushed = true;
+    }
+    return pushed;
+  }
+
   // Returns true when the reading differs from the one on screen.
   function readFaces() {
-    const next = dice.map(faceUp);
+    const next = dice.map((die) => faceUp(die));
     const changed = next.length !== labels.length || next.some((label, i) => label !== labels[i]);
     labels = next;
     return changed;
@@ -506,6 +903,13 @@ export function createRoller() {
     if (world && !resting) {
       carry += dt;
       elapsed += dt;
+      for (const die of dice) {
+        if (die.started || elapsed < die.startAt) continue;
+        die.started = true;
+        die.body.setEnabled(true);
+        die.mesh.visible = true;
+      }
+      if (held) carryHeld();
       let steps = 0;
       while (carry >= STEP && steps < MAX_STEPS_PER_FRAME) {
         world.step();
@@ -516,7 +920,7 @@ export function createRoller() {
       syncMeshes();
       // Round dice (a coin on its rim, a cylinder) would roll about the tray for a long time:
       // nothing in the model stands for rolling resistance, so the damping grows instead.
-      if (elapsed > CALM_AFTER && !calmed) {
+      if (elapsed > CALM_AFTER[way] && !calmed) {
         calmed = true;
         for (const die of dice) {
           die.body.setLinearDamping(1.2);
@@ -525,7 +929,7 @@ export function createRoller() {
       }
       quiet = quietNow() ? quiet + dt : 0;
       // The engine puts bodies to sleep about two seconds after they stop; the reading need not wait for that.
-      const asleep = elapsed > TIMEOUT || dice.every((die) => die.body.isSleeping());
+      const asleep = !held && (elapsed > TIMEOUT[way] || dice.every((die) => die.started && die.body.isSleeping()));
       if (phase === 'rolling') {
         if (asleep || quiet >= QUIET_TIME) {
           readFaces();
@@ -536,7 +940,12 @@ export function createRoller() {
         // A die that was balancing on an edge tipped over after the first reading.
         showResult();
       }
-      if (asleep) resting = true;
+      if (phase === 'done' && settleBetween()) {
+        // The pushed die needs a moment to lie down.
+        elapsed = Math.min(elapsed, TIMEOUT[way] - NUDGE.time);
+      } else if (asleep) {
+        resting = true;
+      }
     }
     view.controls.update();
     view.renderer.render(view.scene, view.camera);
@@ -548,6 +957,7 @@ export function createRoller() {
     ui.root.hidden = false;
     view.scene.background = sceneColor();
     view.moved = false;
+    if (!view.towerGroup.children.length) showTower();
     view.resize();
 
     if (base) base.dispose();
@@ -561,6 +971,7 @@ export function createRoller() {
     if (material) material.dispose();
     material = new THREE.MeshStandardMaterial({ color, roughness: 0.48, metalness: 0.04, flatShading: flat });
     marks = faceMarks.map((mark) => ({ label: mark.label, normal: new THREE.Vector3().fromArray(mark.normal).normalize() }));
+    tie = tieOf(marks);
 
     showOutputs();
     last = performance.now();
@@ -606,7 +1017,8 @@ export function createRoller() {
       } catch {
         // Settings then last for this visit only.
       }
-      throwDice();
+      // The dice go the way they went last time, except that a hand does not throw by itself.
+      throwDice(way === 'tower' ? 'tower' : 'tray');
     });
   }
 
@@ -614,7 +1026,11 @@ export function createRoller() {
   bindSlider(ui.size, 'size');
   bindSlider(ui.weight, 'weight');
   showOutputs();
-  ui.again.addEventListener('click', throwDice);
+  ui.again.addEventListener('click', () => throwDice('tray'));
+  ui.tower.addEventListener('click', () => throwDice('tower'));
+  // Ahead of the camera controls, which listen on the canvas inside the stage.
+  ui.stage.addEventListener('pointerdown', onStageDown, true);
+  ui.stage.addEventListener('pointermove', onStageHover);
   ui.close.addEventListener('click', close);
   ui.root.addEventListener('pointerdown', (event) => {
     if (event.target === ui.root) close();
