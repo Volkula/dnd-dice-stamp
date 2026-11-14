@@ -3,7 +3,7 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { STLLoader } from 'three/addons/loaders/STLLoader.js';
 import { STLExporter } from 'three/addons/exporters/STLExporter.js';
 import { MeshBVH } from 'three-mesh-bvh';
-import { artworkFromSvg, fitContours } from './geom2d.js?v=11';
+import { artworkFromSvg, fitContours } from './geom2d.js?v=12';
 import {
   initManifold,
   localToolGeometry,
@@ -15,7 +15,7 @@ import {
   flipWinding,
   signedVolume,
   manifoldApi,
-} from './stamp.js?v=11';
+} from './stamp.js?v=12';
 import {
   LANGS,
   AppError,
@@ -28,8 +28,8 @@ import {
   onLangChange,
   applyI18n,
   locale,
-} from './i18n.js?v=11';
-import { cacheGet, cacheSet, cacheDel } from './store.js?v=11';
+} from './i18n.js?v=12';
+import { cacheGet, cacheSet, cacheDel } from './store.js?v=12';
 import {
   DEFAULT_FONT,
   EMOJI_CSS_FAMILY,
@@ -45,9 +45,9 @@ import {
   customFonts,
   needsEmoji,
   layoutText,
-} from './fonts.js?v=11';
-import { LIBRARIES, library, loadLibrary, searchItems } from './symbols.js?v=11';
-import { createRoller } from './roll.js?v=11';
+} from './fonts.js?v=12';
+import { LIBRARIES, library, loadLibrary, searchItems } from './symbols.js?v=12';
+import { createRoller } from './roll.js?v=12';
 import {
   MATERIALS,
   materialById,
@@ -60,9 +60,9 @@ import {
   partsOf,
   heatColor,
   heatGeometry,
-} from './balance.js?v=11';
-import { buildDie, fitHeight, shapeById, optionsFor, SHAPES } from './dicegen.js?v=11';
-import { createGenerator } from './genui.js?v=11';
+} from './balance.js?v=12';
+import { buildDie, fitHeight, shapeById, optionsFor, SHAPES } from './dicegen.js?v=12';
+import { createGenerator } from './genui.js?v=12';
 import {
   PROJECT_APP,
   PROJECT_VERSION,
@@ -75,7 +75,7 @@ import {
   decodeGeometry,
   stampToData,
   stampFromData,
-} from './project.js?v=11';
+} from './project.js?v=12';
 
 const THEMES = ['midnight', 'day', 'contrast', 'sepia'];
 const THEME_KEY = 'dice.theme';
@@ -205,9 +205,15 @@ const ui = {
   wrap: $('wrap'),
   list: $('stamps'),
   deselect: $('btn-deselect'),
+  applyAll: $('btn-apply-all'),
   apply: $('btn-apply'),
   undo: $('btn-undo'),
   reset: $('btn-reset'),
+  ask: $('ask'),
+  askTitle: $('ask-title'),
+  askText: $('ask-text'),
+  askOk: $('ask-ok'),
+  askCancel: $('ask-cancel'),
   auto: $('auto'),
   dir: $('btn-dir'),
   dirClear: $('btn-dir-clear'),
@@ -422,9 +428,33 @@ function signSummary() {
   return ui.text.value.replace(/\s+/g, ' ').trim().slice(0, 24) || '—';
 }
 
+// A question in the app's own window. Resolves to true when the user chooses the ok button.
+// Tests may set window.__ask to answer without opening the window.
+function ask({ title, text, ok, cancel, danger = false }) {
+  if (typeof window.__ask === 'function') return window.__ask({ title, text, ok, cancel, danger });
+  ui.askTitle.textContent = title;
+  ui.askText.textContent = text;
+  ui.askOk.textContent = ok || t('ui.ok');
+  ui.askCancel.textContent = cancel || t('ui.cancel');
+  ui.askOk.classList.toggle('primary', !danger);
+  ui.askOk.classList.toggle('danger', danger);
+  return new Promise((resolve) => {
+    const done = () => {
+      ui.ask.removeEventListener('close', done);
+      resolve(ui.ask.returnValue === 'ok');
+    };
+    ui.ask.addEventListener('close', done);
+    // A leftover returnValue from a previous answer would otherwise look like a choice already made.
+    ui.ask.returnValue = '';
+    ui.ask.showModal();
+    (danger ? ui.askCancel : ui.askOk).focus();
+  });
+}
+
 function syncButtons() {
   const has = Boolean(active);
   const any = objects.length > 0;
+  const signs = has ? active.stamps.filter((stamp) => !isPad(stamp)).length : 0;
   ui.flip.disabled = !has || busy;
   ui.fit.disabled = !has || busy;
   ui.regen.hidden = !has || !active.gen;
@@ -435,6 +465,7 @@ function syncButtons() {
   ui.name.disabled = !has;
   ui.saveProject.disabled = !any || busy;
   ui.newProject.disabled = !any || busy;
+  ui.applyAll.disabled = signs === 0 || busy;
   ui.apply.disabled = !has || !active.solid || !engineReady || active.stamps.length === 0 || busy;
   ui.undo.disabled = !has || active.history.length === 0 || busy;
   ui.reset.disabled = !has || busy;
@@ -785,10 +816,15 @@ function toggleObject(obj) {
   touch();
 }
 
-function removeObject(obj) {
+async function removeObject(obj) {
   if (busy) return;
   const hasWork = obj.stamps.length > 0 || obj.edited;
-  if (hasWork && !window.confirm(t('scene.removeConfirm', { name: obj.name }))) return;
+  if (hasWork && !(await ask({
+    title: t('scene.removeTitle'),
+    text: t('scene.removeConfirm', { name: obj.name }),
+    ok: t('scene.removeOk'),
+    danger: true,
+  }))) return;
   const index = objects.indexOf(obj);
   if (index < 0) return;
   objects.splice(index, 1);
@@ -1466,6 +1502,69 @@ function scheduleSourceEdit() {
 }
 
 // Rebuilds the selected stamp from whatever is in the active sign field.
+// Puts the form's font, depth and cut/raise onto every sign of the object. Pads stay as they are.
+// The text or SVG of each stamp stays its own; only how it is cut changes, and for text stamps the font.
+async function applyToAllSigns() {
+  const obj = active;
+  if (!obj || busy) return;
+  const signs = obj.stamps.filter((stamp) => !isPad(stamp));
+  if (!signs.length) return;
+  const depth = Math.max(0.02, num(ui.depth));
+  const how = mode;
+  const fontId = hasFont(ui.font.value) ? ui.font.value : DEFAULT_FONT;
+  const texts = signs.filter((stamp) => stamp.kind === 'text').length;
+  if (!(await ask({
+    title: t('stamps.applyAllTitle'),
+    text: t(texts ? 'stamps.applyAllAsk' : 'stamps.applyAllAskSvg', {
+      name: obj.name,
+      n: signs.length,
+      font: fontName(fontId),
+      depth: formatNumber(depth),
+      how: t(how === 'raise' ? 'how.raise' : 'how.cut'),
+    }),
+    ok: t('stamps.applyAllOk'),
+  }))) return;
+  if (!fontReady && texts) {
+    setStatus('err.fontNotReady');
+    return;
+  }
+  if (texts && needsEmoji(fontId, signs.filter((stamp) => stamp.kind === 'text').map((stamp) => stamp.source).join(''))) {
+    try {
+      await ensureEmoji();
+    } catch {
+      // Missing emoji are reported on the stamps that need them.
+    }
+  }
+  if (!objects.includes(obj)) return;
+  let missing = [];
+  for (const stamp of signs) {
+    stamp.depth = depth;
+    stamp.mode = how;
+    if (stamp.kind === 'text') {
+      try {
+        const artwork = { ...layoutText(fontId, stamp.source, 10), fontId };
+        Object.assign(stamp, shapeFor(artwork.contours, stamp.height), {
+          fontId,
+          sourceContours: artwork.contours,
+          fillRule: artwork.fillRule,
+        });
+        if (artwork.missing && artwork.missing.length) missing = missing.concat(artwork.missing);
+      } catch (error) {
+        setStatus('status.applyAllKept', { reason: errorMsg(error) });
+        return;
+      }
+    }
+    rebuildPreview(obj, stamp);
+  }
+  if (obj === active) {
+    // The form already holds these numbers; the list labels show the new depth and type.
+    renderList();
+  }
+  const unique = [...new Set(missing)];
+  setStatus(unique.length ? msg('status.missing', { chars: unique.join(' ') }) : msg('status.applyAll', { n: signs.length }));
+  touch();
+}
+
 async function applySourceEdit() {
   const obj = active;
   const stamp = selectedStamp();
@@ -1813,7 +1912,12 @@ async function applyGenerated(spec, number) {
     return;
   }
   // Signs already cut into the model go with the old shape.
-  if (obj.edited && !window.confirm(t('model.regenConfirm', { name: obj.name }))) return;
+  if (obj.edited && !(await ask({
+    title: t('model.regenTitle'),
+    text: t('model.regenConfirm', { name: obj.name }),
+    ok: t('model.regenOk'),
+    danger: true,
+  }))) return;
   setBusy(true, 'busy.generating', { n: 1 });
   await nextPaint();
   try {
@@ -3058,9 +3162,14 @@ async function openProject(text) {
   else setStatus('status.projectOpened', { objects: objects.length, n: pendingStamps() });
 }
 
-function newProject() {
+async function newProject() {
   if (!objects.length || busy) return;
-  if (!window.confirm(t('project.newConfirm'))) return;
+  if (!(await ask({
+    title: t('project.newTitle'),
+    text: t('project.newConfirm'),
+    ok: t('project.newOk'),
+    danger: true,
+  }))) return;
   for (const obj of objects) dropCached(obj);
   clearScene();
   activate(null);
@@ -3300,6 +3409,7 @@ ui.padTiltY.addEventListener('input', onGeomInput);
 ui.modeCut.addEventListener('click', () => setMode('cut'));
 ui.modeRaise.addEventListener('click', () => setMode('raise'));
 ui.deselect.addEventListener('click', deselect);
+ui.applyAll.addEventListener('click', () => { applyToAllSigns(); });
 ui.text.addEventListener('input', scheduleSourceEdit);
 ui.svg.addEventListener('input', () => {
   // Hand-edited markup is no longer the icon or file it came from.

@@ -12,7 +12,7 @@
       document.documentElement.dataset.theme = themes.indexOf(saved) >= 0 ? saved : 'midnight';
     })();
   </script>
-  <link rel="stylesheet" href="./styles.css?v=11">
+  <link rel="stylesheet" href="./styles.css?v=12">
   <script type="importmap">
   {
     "imports": {
@@ -262,6 +262,7 @@
           </div>
           <ul id="stamps" class="stamps"></ul>
           <div class="actions">
+            <button id="btn-apply-all" type="button" data-i18n="stamps.applyAll" disabled>Ко всем знакам…</button>
             <button id="btn-apply" type="button" class="primary" data-i18n="stamps.apply" disabled>Нанести на модель</button>
             <button id="btn-undo" type="button" data-i18n="stamps.undo" disabled>Отменить нанесение</button>
             <button id="btn-reset" type="button" data-i18n="stamps.reset" disabled>Вернуть исходный STL</button>
@@ -293,6 +294,17 @@
       </aside>
     </div>
   </div>
+
+  <dialog id="ask" class="ask" aria-labelledby="ask-title">
+    <form method="dialog" class="ask-box">
+      <h2 id="ask-title"></h2>
+      <p id="ask-text" class="ask-text"></p>
+      <div class="ask-actions">
+        <button type="submit" value="cancel" id="ask-cancel" class="ghost" data-i18n="ui.cancel">Отмена</button>
+        <button type="submit" value="ok" id="ask-ok" class="primary" data-i18n="ui.ok">Хорошо</button>
+      </div>
+    </form>
+  </dialog>
 
   <div id="roll" class="roll" hidden>
     <div class="roll-box" role="dialog" aria-modal="true" aria-labelledby="roll-title">
@@ -381,7 +393,7 @@
     </div>
   </div>
 
-  <script type="module" src="./app.js?v=11"></script>
+  <script type="module" src="./app.js?v=12"></script>
   <script>
     setTimeout(function () {
       if (window.__diceApp) return;
