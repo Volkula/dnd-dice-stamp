@@ -1313,16 +1313,21 @@ function buildAxe(kit, plan, spec) {
 }
 
 // A cannon barrel, breech down: the numbers go round the breech.
+// The breech stays as many-sided as the die. The barrel above it, muzzle and bore included,
+// is turned nearly round.
 function buildCannon(kit, plan) {
-  const profile = [
+  const breech = [
     [0, 0], [0.2, 0], [0.3, 0.1], [0.3, 0.25], [0.18, 0.35], [0.18, 0.45], [0.8, 0.5],
-    [1, 0.7], [1, 2.0], [0.9, 2.06], [0.84, 3.1], [0.92, 3.1], [0.92, 3.22], [0.8, 3.26],
+    [1, 0.7], [1, 2.0], [0.9, 2.06], [0, 2.06],
+  ];
+  const barrel = [
+    [0, 2.06], [0.9, 2.06], [0.84, 3.1], [0.92, 3.1], [0.92, 3.22], [0.8, 3.26],
     [0.66, 5.0], [0.72, 5.05], [0.84, 5.3], [0.84, 5.45], [0.72, 5.55], [0.4, 5.55], [0.4, 4.6], [0, 4.6],
   ];
-  const front = Math.PI / plan.faces;
-  const trunnion = kit.keep(kit.api.Manifold.cylinder(2.3, 0.2, 0.2, 16, true));
-  const parts = [aim(kit, trunnion, [Math.cos(front), Math.sin(front), 0], [0, 0, 2.6])];
-  return turned(kit, plan, profile, { low: 0.75, high: 1.95, upright: false }, parts);
+  return {
+    solid: union(kit, [lathe(kit, breech, plan.faces), lathe(kit, barrel, 64)]),
+    faces: bandFaces(plan.faces, 1, 0.75, 1.95, false),
+  };
 }
 
 // A potion: a faceted bottle, a neck that may be turned round, and a stopper.
