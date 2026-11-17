@@ -124,7 +124,7 @@ export const SHAPES = [
 
   { id: 'doubloon', group: 'sea', nameKey: 'gen.shape.doubloon', shortKey: 'gen.short.doubloon', kind: 'ends', stretch: true, themed: true },
   { id: 'tricorn', group: 'sea', nameKey: 'gen.shape.tricorn', shortKey: 'gen.short.tricorn', kind: 'roll', least: 3, themed: true, options: [choice('crown', 'gen.opt.crown', [{ id: 'skull', key: 'gen.opt.crown.skull' }, { id: 'ball', key: 'gen.opt.crown.ball' }])] },
-  { id: 'anchor', group: 'sea', nameKey: 'gen.shape.anchor', shortKey: 'gen.short.anchor', kind: 'roll', least: 4, themed: true },
+  { id: 'anchor', group: 'sea', nameKey: 'gen.shape.anchor', shortKey: 'gen.short.anchor', kind: 'roll', least: 4, themed: true, awkward: true },
   { id: 'crate', group: 'sea', nameKey: 'gen.shape.crate', shortKey: 'gen.short.crate', kind: 'ends', stretch: true, themed: true },
   { id: 'spyglass', group: 'sea', nameKey: 'gen.shape.spyglass', shortKey: 'gen.short.spyglass', kind: 'roll', least: 5, themed: true, options: [choice('tube', 'gen.opt.tube', [{ id: 'single', key: 'gen.opt.tube.single' }, { id: 'pair', key: 'gen.opt.tube.pair' }])] },
   { id: 'wheel', group: 'sea', nameKey: 'gen.shape.wheel', shortKey: 'gen.short.wheel', kind: 'roll', least: 6, themed: true },
@@ -1972,20 +1972,57 @@ function buildTricorn(kit, plan, spec) {
 // A ship's anchor. The four sides of the shank carry the numbers; the ring, the stock and the
 // flukes stay inside those sides, so the shank is what the anchor lies on.
 function buildAnchor(kit, plan) {
+  // A stocked anchor. The shank is the thin square bar; ring, stock and arms are wider
+  // than it and stay clear of the number patch, so the patch itself stays flat.
   const profile = [
-    [0, 0], [0.1, 0], [0.1, 0.15], [0.18, 0.4], [0.7, 0.72], [0.7, 2.45],
-    [0.2, 2.62], [0.16, 3.2], [0, 3.2],
+    [0, 0], [0.3, 0], [0.34, 0.16], [0.22, 0.36], [0.22, 2.55],
+    [0.16, 2.7], [0.16, 3.35], [0.3, 3.5], [0.3, 3.68], [0.08, 3.82], [0, 3.82],
   ];
-  // Above the numbered band, where the neck is already narrower than the shank's faces.
-  const stock = kit.keep(kit.api.Manifold.cylinder(1.2, 0.055, 0.055, 12, true));
-  const fluke = [[0.16, 0.62], [0.62, 0.1], [0.64, 0.3], [0.28, 0.74]];
+  const vertex = (target) => {
+    let best = 0;
+    let gap = Infinity;
+    for (let i = 0; i < plan.faces; i++) {
+      const angle = (i * TAU) / plan.faces;
+      const delta = Math.abs(Math.atan2(Math.sin(angle - target), Math.cos(angle - target)));
+      if (delta < gap) {
+        gap = delta;
+        best = angle;
+      }
+    }
+    return best;
+  };
+  const curve = [
+    [0.24, 0.7], [0.48, 0.32], [0.78, 0.12], [1.02, 0.2], [1.16, 0.48],
+  ];
+  const palm = [
+    [0.78, 0.14], [1.22, 0.1], [1.16, 0.64], [0.74, 0.46],
+  ];
+  const armOf = (angle) => {
+    const dir = [Math.cos(angle), Math.sin(angle)];
+    const place = (radius, z) => [dir[0] * radius, dir[1] * radius, z];
+    const parts = [fin(kit, palm, 0.16, angle)];
+    for (let i = 0; i < curve.length - 1; i++) {
+      const from = curve[i];
+      const to = curve[i + 1];
+      const along = [dir[0] * (to[0] - from[0]), dir[1] * (to[0] - from[0]), to[1] - from[1]];
+      const length = Math.hypot(along[0], along[1], along[2]);
+      const piece = kit.keep(kit.api.Manifold.cylinder(length, 0.09, 0.09, 12, false));
+      parts.push(aim(kit, piece, along, place(from[0], from[1])));
+    }
+    for (const point of curve) parts.push(ball(kit, 0.095, place(point[0], point[1]), 12));
+    return parts;
+  };
+  const arm = vertex(0);
+  const other = vertex(Math.PI);
+  const across = vertex(arm + Math.PI / 2);
+  const stock = kit.keep(kit.api.Manifold.cylinder(2.3, 0.1, 0.1, 14, true));
   const parts = [
-    torus(kit, 0.3, 0.18, 3.02),
-    aim(kit, stock, [1, 0, 0], [0, 0, 2.72]),
-    fin(kit, fluke, 0.07, 0),
-    fin(kit, fluke, 0.07, Math.PI),
+    torus(kit, 0.4, 0.13, 3.62),
+    aim(kit, stock, [Math.cos(across), Math.sin(across), 0], [0, 0, 2.95]),
+    ...armOf(arm),
   ];
-  return turned(kit, plan, profile, { radius: 0.7, low: 0.85, high: 2.3, upright: false, margin: 0.06 }, parts);
+  if (other !== arm) parts.push(...armOf(other));
+  return turned(kit, plan, profile, { radius: 0.22, low: 0.85, high: 2.15, upright: false, margin: 0.03 }, parts);
 }
 
 // A box of planks: corner posts stand on the edges, and a groove near each end reads as a seam.

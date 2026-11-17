@@ -3,7 +3,7 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { STLLoader } from 'three/addons/loaders/STLLoader.js';
 import { STLExporter } from 'three/addons/exporters/STLExporter.js';
 import { MeshBVH } from 'three-mesh-bvh';
-import { artworkFromSvg, fitContours } from './geom2d.js?v=14';
+import { artworkFromSvg, fitContours } from './geom2d.js?v=15';
 import {
   initManifold,
   localToolGeometry,
@@ -15,7 +15,7 @@ import {
   flipWinding,
   signedVolume,
   manifoldApi,
-} from './stamp.js?v=14';
+} from './stamp.js?v=15';
 import {
   LANGS,
   AppError,
@@ -28,8 +28,8 @@ import {
   onLangChange,
   applyI18n,
   locale,
-} from './i18n.js?v=14';
-import { cacheGet, cacheSet, cacheDel } from './store.js?v=14';
+} from './i18n.js?v=15';
+import { cacheGet, cacheSet, cacheDel } from './store.js?v=15';
 import {
   DEFAULT_FONT,
   EMOJI_CSS_FAMILY,
@@ -45,9 +45,9 @@ import {
   customFonts,
   needsEmoji,
   layoutText,
-} from './fonts.js?v=14';
-import { LIBRARIES, library, loadLibrary, searchItems } from './symbols.js?v=14';
-import { createRoller } from './roll.js?v=14';
+} from './fonts.js?v=15';
+import { LIBRARIES, library, loadLibrary, searchItems } from './symbols.js?v=15';
+import { createRoller } from './roll.js?v=15';
 import {
   MATERIALS,
   materialById,
@@ -60,9 +60,9 @@ import {
   partsOf,
   heatColor,
   heatGeometry,
-} from './balance.js?v=14';
-import { buildDie, fitHeight, shapeById, optionsFor, SHAPES } from './dicegen.js?v=14';
-import { createGenerator } from './genui.js?v=14';
+} from './balance.js?v=15';
+import { buildDie, fitHeight, shapeById, optionsFor, SHAPES } from './dicegen.js?v=15';
+import { createGenerator } from './genui.js?v=15';
 import {
   PROJECT_APP,
   PROJECT_VERSION,
@@ -75,7 +75,7 @@ import {
   decodeGeometry,
   stampToData,
   stampFromData,
-} from './project.js?v=14';
+} from './project.js?v=15';
 
 const THEMES = ['midnight', 'day', 'contrast', 'sepia'];
 const THEME_KEY = 'dice.theme';
