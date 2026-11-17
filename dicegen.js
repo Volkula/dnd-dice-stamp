@@ -60,6 +60,7 @@ export const GROUPS = [
   { id: 'music', nameKey: 'gen.group.music' },
   { id: 'vessels', nameKey: 'gen.group.vessels' },
   { id: 'things', nameKey: 'gen.group.things' },
+  { id: 'sea', nameKey: 'gen.group.sea' },
 ];
 
 // kind: 'poly' lands on any face, 'roll' lies on its side (ends carry no number),
@@ -120,6 +121,14 @@ export const SHAPES = [
   { id: 'bone', group: 'things', nameKey: 'gen.shape.bone', shortKey: 'gen.short.bone', kind: 'roll', least: 3, themed: true },
   { id: 'mushroom', group: 'things', nameKey: 'gen.shape.mushroom', shortKey: 'gen.short.mushroom', kind: 'roll', least: 5, themed: true },
   { id: 'cheese', group: 'things', nameKey: 'gen.shape.cheese', shortKey: 'gen.short.cheese', kind: 'ends', stretch: true, themed: true },
+
+  { id: 'doubloon', group: 'sea', nameKey: 'gen.shape.doubloon', shortKey: 'gen.short.doubloon', kind: 'ends', stretch: true, themed: true },
+  { id: 'tricorn', group: 'sea', nameKey: 'gen.shape.tricorn', shortKey: 'gen.short.tricorn', kind: 'roll', least: 3, themed: true, options: [choice('crown', 'gen.opt.crown', [{ id: 'skull', key: 'gen.opt.crown.skull' }, { id: 'ball', key: 'gen.opt.crown.ball' }])] },
+  { id: 'anchor', group: 'sea', nameKey: 'gen.shape.anchor', shortKey: 'gen.short.anchor', kind: 'roll', least: 4, themed: true },
+  { id: 'crate', group: 'sea', nameKey: 'gen.shape.crate', shortKey: 'gen.short.crate', kind: 'ends', stretch: true, themed: true },
+  { id: 'spyglass', group: 'sea', nameKey: 'gen.shape.spyglass', shortKey: 'gen.short.spyglass', kind: 'roll', least: 5, themed: true, options: [choice('tube', 'gen.opt.tube', [{ id: 'single', key: 'gen.opt.tube.single' }, { id: 'pair', key: 'gen.opt.tube.pair' }])] },
+  { id: 'wheel', group: 'sea', nameKey: 'gen.shape.wheel', shortKey: 'gen.short.wheel', kind: 'roll', least: 6, themed: true },
+  { id: 'rynda', group: 'sea', nameKey: 'gen.shape.rynda', shortKey: 'gen.short.rynda', kind: 'roll', least: 5, themed: true, options: [{ id: 'clapper', type: 'check', labelKey: 'gen.opt.clapper', initial: true }] },
 ];
 
 export const CAPS = ['cone', 'dome', 'flat'];
@@ -938,6 +947,31 @@ function plaque(kit, outline, thickness, angle, distance) {
 function ball(kit, radius, at, segments = 16) {
   const sphere = kit.keep(kit.api.Manifold.sphere(radius, segments));
   return kit.keep(sphere.translate(at[0], at[1], at[2]));
+}
+
+// A ring in the plane of the equator, centred on the axis.
+function torus(kit, radius, tube, z, segments = 28) {
+  const loop = [];
+  for (let i = 0; i < 16; i++) {
+    const angle = (i * TAU) / 16;
+    loop.push([radius + tube * Math.cos(angle), z + tube * Math.sin(angle)]);
+  }
+  return lathe(kit, loop, segments);
+}
+
+// A round head with two eye holes, a nose hole and a jaw. It has to overlap whatever it sits on.
+function skull(kit, radius, at) {
+  const head = ball(kit, radius, [0, 0, 0], 36);
+  const jaw = ball(kit, radius * 0.4, [0, -radius * 0.02, -radius * 0.58], 16);
+  // Both sockets face the same way, far enough out to open on the surface.
+  const socket = (side) => ball(kit, radius * 0.4, [side * radius * 0.4, -radius * 0.55, radius * 0.2], 16);
+  const nose = ball(kit, radius * 0.24, [0, -radius * 0.82, radius * 0.02], 12);
+  const slot = kit.keep(kit.api.Manifold.cube([radius * 0.55, radius * 0.55, radius * 0.14], true));
+  const mouth = kit.keep(slot.translate(0, -radius * 0.55, -radius * 0.32));
+  const face = kit.keep(union(kit, [head, jaw]).subtract(union(kit, [socket(-1), socket(1), nose, mouth])));
+  // The usual camera looks from the side as well as the front, so the face is turned to meet it.
+  const turned = kit.keep(face.rotate([0, 0, 37]));
+  return kit.keep(turned.translate(at[0], at[1], at[2]));
 }
 
 // Rings turned on a shaft: the points to put into a profile on the way up.
@@ -1894,6 +1928,218 @@ function buildEgg(kit, plan, spec) {
   });
 }
 
+// A thick coin with a reeded edge. The two faces carry the numbers; the reeds stay on the edge.
+function buildDoubloon(kit, plan, spec) {
+  const coin = plan.faces === 2;
+  const sides = coin ? 48 : plan.faces - 2;
+  const outline = regularPolygon(sides);
+  const height = (coin ? 0.42 : Math.min(0.7, fairHeight(polygonArea(outline), plan.faces))) * spec.stretch;
+  const top = height / 2;
+  const rim = insetPolygon(outline, 0.1);
+  const parts = [
+    extrudeAt(kit, sectionOf(kit, outline), -top, top),
+    ringBetween(kit, outline, rim, top - 0.01, top + 0.05),
+    ringBetween(kit, outline, rim, -top - 0.05, -top + 0.01),
+  ];
+  // Reeds only while nothing is read from the edge: they would cover a side face.
+  if (coin) {
+    const reed = kit.keep(kit.api.Manifold.cube([0.07, 0.045, top * 1.15], true));
+    for (let i = 0; i < 36; i++) {
+      const placed = kit.keep(reed.translate(0.99, 0, 0));
+      parts.push(kit.keep(placed.rotate([0, 0, (i * 360) / 36])));
+    }
+  }
+  const faces = endFaces(insetPolygon(outline, 0.22), top, -top);
+  if (!coin) faces.push(...bandFaces(sides, 1, -top + 0.08, top - 0.08, true));
+  return { solid: union(kit, parts), faces };
+}
+
+// A cocked hat: the numbers go on the brim. A skull or a ball sits on the crown.
+function buildTricorn(kit, plan, spec) {
+  const profile = [
+    [0, 0], [0.42, 0], [1, 0.08], [1, 0.4], [0.62, 0.55], [0.46, 0.82], [0.46, 1.32], [0.26, 1.46], [0, 1.46],
+  ];
+  const parts = [spec.options.crown === 'ball' ? ball(kit, 0.3, [0, 0, 1.58], 22) : skull(kit, 0.3, [0, 0, 1.58])];
+  // One cocked corner on every edge, and only while the brim still has corners to cock.
+  const cocked = plan.faces <= 6;
+  if (cocked) {
+    const curl = [[0.62, 0.18], [0.94, 0.28], [0.94, 0.92], [0.58, 0.5]];
+    for (let i = 0; i < plan.faces; i++) parts.push(fin(kit, curl, 0.03, (i * TAU) / plan.faces));
+  }
+  return turned(kit, plan, profile, { low: 0.12, high: 0.36, upright: false, margin: cocked ? 0.05 : 0 }, parts);
+}
+
+// A ship's anchor. The four sides of the shank carry the numbers; the ring, the stock and the
+// flukes stay inside those sides, so the shank is what the anchor lies on.
+function buildAnchor(kit, plan) {
+  const profile = [
+    [0, 0], [0.1, 0], [0.1, 0.15], [0.18, 0.4], [0.7, 0.72], [0.7, 2.45],
+    [0.2, 2.62], [0.16, 3.2], [0, 3.2],
+  ];
+  // Above the numbered band, where the neck is already narrower than the shank's faces.
+  const stock = kit.keep(kit.api.Manifold.cylinder(1.2, 0.055, 0.055, 12, true));
+  const fluke = [[0.16, 0.62], [0.62, 0.1], [0.64, 0.3], [0.28, 0.74]];
+  const parts = [
+    torus(kit, 0.3, 0.18, 3.02),
+    aim(kit, stock, [1, 0, 0], [0, 0, 2.72]),
+    fin(kit, fluke, 0.07, 0),
+    fin(kit, fluke, 0.07, Math.PI),
+  ];
+  return turned(kit, plan, profile, { radius: 0.7, low: 0.85, high: 2.3, upright: false, margin: 0.06 }, parts);
+}
+
+// A box of planks: corner posts stand on the edges, and a groove near each end reads as a seam.
+function buildCrate(kit, plan, spec) {
+  const coin = plan.faces === 2;
+  const sides = coin ? 4 : plan.faces - 2;
+  const outline = sides === 4
+    ? [[0.85, -0.85], [0.85, 0.85], [-0.85, 0.85], [-0.85, -0.85]]
+    : regularPolygon(sides, 1, -Math.PI / sides);
+  const height = (coin ? 0.55 : Math.min(1.7, fairHeight(polygonArea(outline), plan.faces))) * spec.stretch;
+  const top = height / 2;
+  const parts = [extrudeAt(kit, sectionOf(kit, outline), -top, top)];
+  const edge = Math.hypot(outline[1][0] - outline[0][0], outline[1][1] - outline[0][1]);
+  const half = Math.min(0.07, edge * 0.12);
+  const posts = [];
+  outline.forEach(([x, y]) => {
+    const reach = Math.hypot(x, y) || 1;
+    const out = [x / reach, y / reach];
+    const centre = [x + out[0] * half * 0.6, y + out[1] * half * 0.6];
+    const post = [
+      [centre[0] - half, centre[1] - half],
+      [centre[0] + half, centre[1] - half],
+      [centre[0] + half, centre[1] + half],
+      [centre[0] - half, centre[1] + half],
+    ];
+    posts.push(extrudeAt(kit, sectionOf(kit, post), -top - 0.03, top + 0.03));
+  });
+  parts.push(...posts);
+  let solid = union(kit, parts);
+  if (top >= 0.4) {
+    const grooves = [];
+    for (let i = 0; i < outline.length; i++) {
+      const p = outline[i];
+      const q = outline[(i + 1) % outline.length];
+      const dx = q[0] - p[0];
+      const dy = q[1] - p[1];
+      const length = Math.hypot(dx, dy) || 1;
+      const along = [dx / length, dy / length];
+      const mid = [(p[0] + q[0]) / 2, (p[1] + q[1]) / 2];
+      const outLen = Math.hypot(mid[0], mid[1]) || 1;
+      const out = [mid[0] / outLen, mid[1] / outLen];
+      const pad = Math.min(0.14, length * 0.2);
+      const a = [p[0] + along[0] * pad, p[1] + along[1] * pad];
+      const b = [q[0] - along[0] * pad, q[1] - along[1] * pad];
+      const slot = (depth) => [
+        [a[0] + out[0] * 0.02, a[1] + out[1] * 0.02],
+        [b[0] + out[0] * 0.02, b[1] + out[1] * 0.02],
+        [b[0] - out[0] * depth, b[1] - out[1] * depth],
+        [a[0] - out[0] * depth, a[1] - out[1] * depth],
+      ];
+      for (const z of [top * 0.72, -top * 0.72]) grooves.push(extrudeAt(kit, sectionOf(kit, slot(0.05)), z - 0.02, z + 0.02));
+    }
+    solid = kit.keep(solid.subtract(union(kit, grooves)));
+  }
+  const faces = endFaces(insetPolygon(outline, 0.2), top, -top);
+  if (!coin) {
+    for (let i = 0; i < outline.length; i++) {
+      const p = outline[i];
+      const q = outline[(i + 1) % outline.length];
+      const dx = q[0] - p[0];
+      const dy = q[1] - p[1];
+      const length = Math.hypot(dx, dy) || 1;
+      const along = [dx / length, dy / length];
+      const pad = Math.min(0.2, length * 0.22);
+      const start = [p[0] + along[0] * pad, p[1] + along[1] * pad];
+      const stop = [q[0] - along[0] * pad, q[1] - along[1] * pad];
+      const mid = [(p[0] + q[0]) / 2, (p[1] + q[1]) / 2];
+      const outLen = Math.hypot(mid[0], mid[1]) || 1;
+      faces.push({
+        normal: [mid[0] / outLen, mid[1] / outLen, 0],
+        polygon: [
+          [start[0], start[1], -top * 0.42],
+          [stop[0], stop[1], -top * 0.42],
+          [stop[0], stop[1], top * 0.42],
+          [start[0], start[1], top * 0.42],
+        ],
+        up: [0, 0, 1],
+      });
+    }
+  }
+  return { solid, faces };
+}
+
+// Two round barrels side by side, held by a faceted block the numbers go on.
+function buildBinoculars(kit, plan) {
+  const block = [
+    [0, 0.95], [1, 0.95], [1, 2.15], [0, 2.15],
+  ];
+  const parts = [lathe(kit, block, plan.faces)];
+  const barrel = [
+    [0, 0], [0.26, 0], [0.32, 0.08], [0.32, 0.82], [0.34, 0.9], [0.34, 1.06],
+    [0.2, 1.06], [0.2, 0.86], [0, 0.86],
+  ];
+  for (const side of [-1, 1]) {
+    const front = kit.keep(lathe(kit, barrel, 36).translate(side * 0.36, 0, 0.15));
+    const back = kit.keep(lathe(kit, barrel, 36).translate(side * 0.36, 0, 1.95));
+    parts.push(front, back);
+  }
+  return {
+    solid: union(kit, parts),
+    faces: bandFaces(plan.faces, 1, 1.1, 2.0, false),
+  };
+}
+
+// A collapsing telescope, or a pair of them. The numbers go round the thickest tube.
+function buildSpyglass(kit, plan, spec) {
+  if (spec.options.tube === 'pair') return buildBinoculars(kit, plan);
+  const profile = [
+    [0, 0], [0.42, 0], [0.55, 0.1], [0.55, 0.32], [0.36, 0.42], [0.36, 1.15],
+    [0.52, 1.25], [0.52, 2.05], [0.78, 2.16], [1, 2.28], [1, 3.35], [0.82, 3.46],
+    [0.62, 3.56], [0.62, 4.15], [0.9, 4.32], [0.9, 4.55], [0.5, 4.55], [0.5, 4.28], [0, 4.28],
+  ];
+  return turned(kit, plan, profile, { low: 2.4, high: 3.25, upright: false });
+}
+
+// A ship's wheel stood on its rim: spokes to the hub, a stub of the axle, pegs on the corners.
+function buildWheel(kit, plan) {
+  const sides = plan.faces;
+  const thick = 0.16;
+  const inner = 0.78;
+  const rim = ringBetween(kit, regularPolygon(sides), regularPolygon(sides, inner), -thick, thick);
+  const hub = lathe(kit, [[0, -0.34], [0.2, -0.34], [0.2, 0.34], [0, 0.34]], 24);
+  const parts = [rim, hub];
+  const spokes = sides <= 16 ? sides : 8;
+  for (let i = 0; i < spokes; i++) {
+    const angle = ((i + (sides <= 16 ? 0 : 0.5)) * TAU) / spokes;
+    const dir = [Math.cos(angle), Math.sin(angle), 0];
+    const spoke = kit.keep(kit.api.Manifold.cylinder(inner - 0.16, 0.04, 0.04, 8, false));
+    parts.push(aim(kit, spoke, dir, [dir[0] * 0.16, dir[1] * 0.16, 0]));
+  }
+  if (sides <= 14) {
+    for (let i = 0; i < sides; i++) {
+      const angle = (i * TAU) / sides;
+      const peg = kit.keep(kit.api.Manifold.cylinder(0.5, 0.05, 0.05, 8, true));
+      parts.push(kit.keep(peg.translate(0.88 * Math.cos(angle), 0.88 * Math.sin(angle), 0)));
+    }
+  }
+  return { solid: union(kit, parts), faces: bandFaces(sides, 1, -thick * 0.65, thick * 0.65, false, 0.03) };
+}
+
+// A ship's bell: wider and squatter than the hand bell, with a ring to hang it by.
+function buildRynda(kit, plan, spec) {
+  const clapper = spec.options.clapper
+    ? [[0, 0.18], [0.14, 0.22], [0.2, 0.4], [0.2, 0.52], [0.12, 0.64], [0.05, 0.68], [0.05, 0.95]]
+    : [[0, 0.95]];
+  const profile = [
+    ...clapper,
+    [0.42, 0.95], [0.55, 0.7], [0.78, 0.35], [1, 0.08], [1, 0.5],
+    [0.7, 0.78], [0.48, 1.05], [0.3, 1.28], [0.18, 1.55], [0.32, 1.68], [0.32, 1.88], [0.12, 1.98], [0, 1.98],
+  ];
+  const loop = kit.keep(torus(kit, 0.18, 0.055, 0, 24).rotate([90, 0, 0]));
+  return turned(kit, plan, profile, { low: 0.12, high: 0.46 }, [kit.keep(loop.translate(0, 0, 2.02))]);
+}
+
 const BUILDERS = {
   sphere: buildSphere,
   spindle: buildSpindle,
@@ -1920,6 +2166,13 @@ const BUILDERS = {
   shuriken: buildShuriken,
   cannon: buildCannon,
   bomb: buildBomb,
+  doubloon: buildDoubloon,
+  tricorn: buildTricorn,
+  anchor: buildAnchor,
+  crate: buildCrate,
+  spyglass: buildSpyglass,
+  wheel: buildWheel,
+  rynda: buildRynda,
   djembe: buildDjembe,
   tambourine: buildTambourine,
   gong: buildGong,

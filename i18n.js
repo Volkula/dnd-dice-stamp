@@ -1,4 +1,4 @@
-import { STRINGS } from './strings.js?v=13';
+import { STRINGS } from './strings.js?v=14';
 
 export const LANGS = [
   ['ru', 'Русский'],

@@ -1,5 +1,5 @@
-import { AppError } from './i18n.js?v=13';
-import { ensureEmoji, emojiHasGlyph } from './fonts.js?v=13';
+import { AppError } from './i18n.js?v=14';
+import { ensureEmoji, emojiHasGlyph } from './fonts.js?v=14';
 
 const CDN = 'https://cdn.jsdelivr.net/npm';
 

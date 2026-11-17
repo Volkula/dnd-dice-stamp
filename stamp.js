@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { mergeVertices } from 'three/addons/utils/BufferGeometryUtils.js';
 import { MeshBVH } from 'three-mesh-bvh';
 import Module from 'manifold-3d';
-import { AppError } from './i18n.js?v=13';
+import { AppError } from './i18n.js?v=14';
 
 const WASM = 'https://cdn.jsdelivr.net/npm/manifold-3d@3.5.4/manifold.wasm';
 
